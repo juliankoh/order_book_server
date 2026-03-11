@@ -5,12 +5,13 @@ use crate::{
     order_book::{Coin, Snapshot},
     prelude::*,
     types::{
-        L2Book, L4Book, L4BookUpdates, L4Order, Trade,
+        L2Book, L4Book, L4BookUpdates, L4Order, OpenOrdersData, Trade,
         inner::InnerLevel,
         node_data::{Batch, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
         subscription::{ClientMessage, DEFAULT_LEVELS, ServerResponse, Subscription, SubscriptionManager},
     },
 };
+use alloy::primitives::Address;
 use axum::{Router, response::IntoResponse, routing::get};
 use futures_util::{SinkExt, StreamExt};
 use log::{error, info};
@@ -132,6 +133,11 @@ async fn handle_socket(
                                 let mut book_updates = coin_to_book_updates(diff_batch, status_batch);
                                 for sub in manager.subscriptions() {
                                     send_ws_data_from_book_updates(&mut socket, sub, &mut book_updates).await;
+                                }
+                            },
+                            InternalMessage::OpenOrdersUpdate { changed_users } => {
+                                for sub in manager.subscriptions() {
+                                    send_ws_data_from_open_orders(&mut socket, sub, changed_users).await;
                                 }
                             },
                         }
@@ -331,6 +337,24 @@ async fn send_ws_data_from_book_updates(
     }
 }
 
+async fn send_ws_data_from_open_orders(
+    socket: &mut WebSocket,
+    subscription: &Subscription,
+    changed_users: &HashMap<Address, Vec<L4Order>>,
+) {
+    if let Subscription::OpenOrders { user } = subscription {
+        if let Ok(addr) = user.parse::<Address>() {
+            if let Some(orders) = changed_users.get(&addr) {
+                let msg = ServerResponse::OpenOrders(OpenOrdersData {
+                    user: addr,
+                    open_orders: orders.clone(),
+                });
+                send_socket_message(socket, msg).await;
+            }
+        }
+    }
+}
+
 async fn send_ws_data_from_trades(
     socket: &mut WebSocket,
     subscription: &Subscription,
@@ -367,6 +391,14 @@ impl Subscription {
                 }
             }
             return Err("Snapshot Failed".into());
+        }
+        if let Self::OpenOrders { user } = self {
+            let addr = user.parse::<Address>().map_err(|e| format!("Invalid address: {e}"))?;
+            let orders = listener.lock().await.get_open_orders(&addr);
+            return Ok(Some(ServerResponse::OpenOrders(OpenOrdersData {
+                user: addr,
+                open_orders: orders,
+            })));
         }
         Ok(None)
     }

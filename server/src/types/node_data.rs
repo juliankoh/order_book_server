@@ -29,6 +29,14 @@ impl NodeDataOrderDiff {
     pub(crate) fn coin(&self) -> Coin {
         Coin::new(&self.coin)
     }
+
+    pub(crate) const fn user(&self) -> Address {
+        self.user
+    }
+
+    pub(crate) const fn raw_oid(&self) -> u64 {
+        self.oid
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,5 +95,9 @@ impl<E> Batch<E> {
 
     pub(crate) fn events(self) -> Vec<E> {
         self.events
+    }
+
+    pub(crate) fn events_ref(&self) -> &[E] {
+        &self.events
     }
 }

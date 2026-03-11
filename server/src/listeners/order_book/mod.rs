@@ -7,7 +7,7 @@ use crate::{
     },
     prelude::*,
     types::{
-        L4Order,
+        L4Order, OrderDiff,
         inner::{InnerL4Order, InnerLevel},
         node_data::{Batch, EventSource, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
     },
@@ -200,10 +200,12 @@ pub(crate) struct OrderBookListener {
     // Only Some when we want it to collect updates
     fetched_snapshot_cache: Option<VecDeque<(Batch<NodeDataOrderStatus>, Batch<NodeDataOrderDiff>)>>,
     internal_message_tx: Option<Sender<Arc<InternalMessage>>>,
+    // Tracks open orders per user: address -> (oid -> order)
+    open_orders: HashMap<Address, HashMap<u64, L4Order>>,
 }
 
 impl OrderBookListener {
-    pub(crate) const fn new(internal_message_tx: Option<Sender<Arc<InternalMessage>>>, ignore_spot: bool) -> Self {
+    pub(crate) fn new(internal_message_tx: Option<Sender<Arc<InternalMessage>>>, ignore_spot: bool) -> Self {
         Self {
             ignore_spot,
             fill_status_file: None,
@@ -215,6 +217,7 @@ impl OrderBookListener {
             internal_message_tx,
             order_diff_cache: BatchQueue::new(),
             order_status_cache: BatchQueue::new(),
+            open_orders: HashMap::new(),
         }
     }
 
@@ -287,14 +290,29 @@ impl OrderBookListener {
                 if let Some(cache) = &mut self.fetched_snapshot_cache {
                     cache.push_back((order_statuses.clone(), order_diffs.clone()));
                 }
+                // Update open orders state and collect changed users
+                let changed_users = self.update_open_orders(&order_statuses, &order_diffs);
                 if let Some(tx) = &self.internal_message_tx {
                     let tx = tx.clone();
+                    let open_orders_update = if !changed_users.is_empty() {
+                        let mut updates = HashMap::new();
+                        for user in &changed_users {
+                            updates.insert(*user, self.get_open_orders(user));
+                        }
+                        Some(updates)
+                    } else {
+                        None
+                    };
                     tokio::spawn(async move {
                         let updates = Arc::new(InternalMessage::L4BookUpdates {
                             diff_batch: order_diffs,
                             status_batch: order_statuses,
                         });
                         let _unused = tx.send(updates);
+                        if let Some(oo_updates) = open_orders_update {
+                            let msg = Arc::new(InternalMessage::OpenOrdersUpdate { changed_users: oo_updates });
+                            let _unused = tx.send(msg);
+                        }
                     });
                 }
             }
@@ -313,9 +331,24 @@ impl OrderBookListener {
 
     fn init_from_snapshot(&mut self, snapshot: Snapshots<InnerL4Order>, height: u64) {
         info!("No existing snapshot");
+        // Initialize open orders from snapshot before it's consumed
+        self.open_orders.clear();
+        for (_, book) in snapshot.as_ref() {
+            for side_orders in book.as_ref() {
+                for order in side_orders {
+                    let l4_order = L4Order::from(order.clone());
+                    self.open_orders
+                        .entry(order.user)
+                        .or_default()
+                        .insert(order.oid, l4_order);
+                }
+            }
+        }
+        info!("Initialized open orders for {} users", self.open_orders.len());
         let mut new_order_book = OrderBookState::from_snapshot(snapshot, height, 0, true, self.ignore_spot);
         let mut retry = false;
         while let Some((order_statuses, order_diffs)) = self.pop_cache() {
+            self.update_open_orders(&order_statuses, &order_diffs);
             if new_order_book.apply_updates(order_statuses, order_diffs).is_err() {
                 info!(
                     "Failed to apply updates to this book (likely missing older updates). Waiting for next snapshot."
@@ -327,6 +360,8 @@ impl OrderBookListener {
         if !retry {
             self.order_book_state = Some(new_order_book);
             info!("Order book ready");
+        } else {
+            self.open_orders.clear();
         }
     }
 
@@ -338,6 +373,73 @@ impl OrderBookListener {
     // prevent snapshotting mutiple times at the same height
     fn l2_snapshots(&mut self, prevent_future_snaps: bool) -> Option<(u64, L2Snapshots)> {
         self.order_book_state.as_mut().and_then(|o| o.l2_snapshots(prevent_future_snaps))
+    }
+
+    /// Returns the current open orders for a given user address
+    pub(crate) fn get_open_orders(&self, user: &Address) -> Vec<L4Order> {
+        self.open_orders
+            .get(user)
+            .map(|orders| orders.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Applies order status and book diff events to the open orders map.
+    /// Returns the set of users whose open orders changed in this block.
+    fn update_open_orders(
+        &mut self,
+        order_statuses: &Batch<NodeDataOrderStatus>,
+        order_diffs: &Batch<NodeDataOrderDiff>,
+    ) -> HashSet<Address> {
+        let mut changed_users = HashSet::new();
+
+        // Build map of newly-inserted orders from order statuses
+        let mut new_orders: HashMap<u64, &NodeDataOrderStatus> = HashMap::new();
+        for status in order_statuses.events_ref() {
+            if status.is_inserted_into_book() {
+                new_orders.insert(status.order.oid, status);
+            }
+        }
+
+        // Process book diffs to update open orders
+        for diff in order_diffs.events_ref() {
+            let oid = diff.raw_oid();
+            let user = diff.user();
+
+            match &diff.raw_book_diff {
+                OrderDiff::New { sz } => {
+                    if let Some(status) = new_orders.remove(&oid) {
+                        let mut order = status.order.clone();
+                        order.user = Some(status.user);
+                        order.sz = sz.clone();
+                        self.open_orders
+                            .entry(status.user)
+                            .or_default()
+                            .insert(oid, order);
+                        changed_users.insert(status.user);
+                    }
+                }
+                OrderDiff::Update { new_sz, .. } => {
+                    if let Some(user_orders) = self.open_orders.get_mut(&user) {
+                        if let Some(order) = user_orders.get_mut(&oid) {
+                            order.sz = new_sz.clone();
+                            changed_users.insert(user);
+                        }
+                    }
+                }
+                OrderDiff::Remove => {
+                    if let Some(user_orders) = self.open_orders.get_mut(&user) {
+                        if user_orders.remove(&oid).is_some() {
+                            changed_users.insert(user);
+                            if user_orders.is_empty() {
+                                self.open_orders.remove(&user);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        changed_users
     }
 }
 
@@ -468,6 +570,7 @@ pub(crate) enum InternalMessage {
     Snapshot { l2_snapshots: L2Snapshots, time: u64 },
     Fills { batch: Batch<NodeDataFill> },
     L4BookUpdates { diff_batch: Batch<NodeDataOrderDiff>, status_batch: Batch<NodeDataOrderStatus> },
+    OpenOrdersUpdate { changed_users: HashMap<Address, Vec<L4Order>> },
 }
 
 #[derive(Eq, PartialEq, Hash)]

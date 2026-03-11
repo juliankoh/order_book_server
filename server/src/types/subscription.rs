@@ -1,4 +1,5 @@
-use crate::types::{L2Book, L4Book, Trade};
+use alloy::primitives::Address;
+use crate::types::{L2Book, L4Book, OpenOrdersData, Trade};
 use log::info;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -24,6 +25,8 @@ pub(crate) enum Subscription {
     L2Book { coin: String, n_sig_figs: Option<u32>, n_levels: Option<usize>, mantissa: Option<u64> },
     #[serde(rename_all = "camelCase")]
     L4Book { coin: String },
+    #[serde(rename_all = "camelCase")]
+    OpenOrders { user: String },
 }
 
 impl Subscription {
@@ -69,6 +72,15 @@ impl Subscription {
                 info!("Valid subscription");
                 true
             }
+            Self::OpenOrders { user } => {
+                if user.parse::<Address>().is_ok() {
+                    info!("Valid subscription");
+                    true
+                } else {
+                    info!("Invalid subscription: invalid address format");
+                    false
+                }
+            }
         }
     }
 }
@@ -81,6 +93,7 @@ pub(crate) enum ServerResponse {
     L2Book(L2Book),
     L4Book(L4Book),
     Trades(Vec<Trade>),
+    OpenOrders(OpenOrdersData),
     Error(String),
 }
 

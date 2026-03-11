@@ -13,6 +13,13 @@ pub(crate) mod node_data;
 pub(crate) mod subscription;
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OpenOrdersData {
+    pub user: Address,
+    pub open_orders: Vec<L4Order>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Trade {
     pub coin: String,
     side: Side,
