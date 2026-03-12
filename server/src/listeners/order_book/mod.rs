@@ -40,9 +40,10 @@ mod utils;
 // WARNING - this code assumes no other file system operations are occurring in the watched directories
 // if there are scripts running, this may not work as intended
 pub(crate) async fn hl_listen(listener: Arc<Mutex<OrderBookListener>>, dir: PathBuf) -> Result<()> {
-    let order_statuses_dir = EventSource::OrderStatuses.event_source_dir(&dir).canonicalize()?;
-    let fills_dir = EventSource::Fills.event_source_dir(&dir).canonicalize()?;
-    let order_diffs_dir = EventSource::OrderDiffs.event_source_dir(&dir).canonicalize()?;
+    let streaming = listener.lock().await.streaming;
+    let order_statuses_dir = EventSource::OrderStatuses.event_source_dir_streaming(&dir, streaming).canonicalize()?;
+    let fills_dir = EventSource::Fills.event_source_dir_streaming(&dir, streaming).canonicalize()?;
+    let order_diffs_dir = EventSource::OrderDiffs.event_source_dir_streaming(&dir, streaming).canonicalize()?;
     info!("Monitoring order status directory: {}", order_statuses_dir.display());
     info!("Monitoring order diffs directory: {}", order_diffs_dir.display());
     info!("Monitoring fills directory: {}", fills_dir.display());

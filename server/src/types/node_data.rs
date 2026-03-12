@@ -67,10 +67,16 @@ pub(crate) enum EventSource {
 impl EventSource {
     #[must_use]
     pub(crate) fn event_source_dir(self, dir: &Path) -> PathBuf {
+        self.event_source_dir_streaming(dir, false)
+    }
+
+    #[must_use]
+    pub(crate) fn event_source_dir_streaming(self, dir: &Path, streaming: bool) -> PathBuf {
+        let suffix = if streaming { "_streaming" } else { "_by_block" };
         match self {
-            Self::Fills => dir.join("hl/data/node_fills_by_block"),
-            Self::OrderStatuses => dir.join("hl/data/node_order_statuses_by_block"),
-            Self::OrderDiffs => dir.join("hl/data/node_raw_book_diffs_by_block"),
+            Self::Fills => dir.join(format!("hl/data/node_fills{suffix}")),
+            Self::OrderStatuses => dir.join(format!("hl/data/node_order_statuses{suffix}")),
+            Self::OrderDiffs => dir.join(format!("hl/data/node_raw_book_diffs{suffix}")),
         }
     }
 }
