@@ -245,35 +245,55 @@ impl OrderBookListener {
     #[allow(clippy::type_complexity)]
     // pops earliest pair of cached updates that have the same timestamp if possible
     fn pop_cache(&mut self) -> Option<(Batch<NodeDataOrderStatus>, Batch<NodeDataOrderDiff>)> {
-        // In streaming mode, only pop blocks that are known complete
-        // (a newer block exists behind them in the queue)
-        if self.streaming
-            && (!self.order_diff_cache.is_front_complete() || !self.order_status_cache.is_front_complete())
-        {
-            return None;
-        }
         // synchronize to same block
         match (self.order_diff_cache.front(), self.order_status_cache.front()) {
             (Some(diffs), Some(statuses)) => {
                 match diffs.block_number().cmp(&statuses.block_number()) {
                     Ordering::Equal => {
+                        // In streaming mode, only pop when we know this block is complete
+                        // (a newer block exists in at least one cache)
+                        if self.streaming
+                            && !self.order_diff_cache.is_front_complete()
+                            && !self.order_status_cache.is_front_complete()
+                        {
+                            return None;
+                        }
                         self.order_status_cache
                             .pop_front()
                             .and_then(|t| self.order_diff_cache.pop_front().map(|s| (t, s)))
                     }
                     Ordering::Less => {
                         // diffs block has no matching statuses — pair with empty statuses
+                        // The statuses cache having a newer block proves this diffs block is complete
+                        if self.streaming && !self.order_diff_cache.is_front_complete() {
+                            return None;
+                        }
                         let diffs = self.order_diff_cache.pop_front().unwrap();
                         let empty_statuses = diffs.empty_with_metadata();
                         Some((empty_statuses, diffs))
                     }
                     Ordering::Greater => {
                         // statuses block has no matching diffs — pair with empty diffs
+                        // The diffs cache having a newer block proves this statuses block is complete
+                        if self.streaming && !self.order_status_cache.is_front_complete() {
+                            return None;
+                        }
                         let statuses = self.order_status_cache.pop_front().unwrap();
                         let empty_diffs = statuses.empty_with_metadata();
                         Some((statuses, empty_diffs))
                     }
                 }
+            }
+            // In streaming mode, one cache might have blocks the other doesn't
+            (Some(_), None) if self.streaming && self.order_diff_cache.is_front_complete() => {
+                let diffs = self.order_diff_cache.pop_front().unwrap();
+                let empty_statuses = diffs.empty_with_metadata();
+                Some((empty_statuses, diffs))
+            }
+            (None, Some(_)) if self.streaming && self.order_status_cache.is_front_complete() => {
+                let statuses = self.order_status_cache.pop_front().unwrap();
+                let empty_diffs = statuses.empty_with_metadata();
+                Some((statuses, empty_diffs))
             }
             _ => None,
         }
