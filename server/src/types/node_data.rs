@@ -110,4 +110,8 @@ impl<E> Batch<E> {
     pub(crate) fn extend_events(&mut self, other: Self) {
         self.events.extend(other.events);
     }
+
+    pub(crate) fn empty_with_metadata<T>(&self) -> Batch<T> {
+        Batch { local_time: self.local_time, block_time: self.block_time, block_number: self.block_number, events: Vec::new() }
+    }
 }

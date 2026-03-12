@@ -253,27 +253,30 @@ impl OrderBookListener {
             return None;
         }
         // synchronize to same block
-        while let Some(t) = self.order_diff_cache.front() {
-            if let Some(s) = self.order_status_cache.front() {
-                match t.block_number().cmp(&s.block_number()) {
-                    Ordering::Less => {
-                        self.order_diff_cache.pop_front();
-                    }
+        match (self.order_diff_cache.front(), self.order_status_cache.front()) {
+            (Some(diffs), Some(statuses)) => {
+                match diffs.block_number().cmp(&statuses.block_number()) {
                     Ordering::Equal => {
-                        return self
-                            .order_status_cache
+                        self.order_status_cache
                             .pop_front()
-                            .and_then(|t| self.order_diff_cache.pop_front().map(|s| (t, s)));
+                            .and_then(|t| self.order_diff_cache.pop_front().map(|s| (t, s)))
+                    }
+                    Ordering::Less => {
+                        // diffs block has no matching statuses — pair with empty statuses
+                        let diffs = self.order_diff_cache.pop_front().unwrap();
+                        let empty_statuses = diffs.empty_with_metadata();
+                        Some((empty_statuses, diffs))
                     }
                     Ordering::Greater => {
-                        self.order_status_cache.pop_front();
+                        // statuses block has no matching diffs — pair with empty diffs
+                        let statuses = self.order_status_cache.pop_front().unwrap();
+                        let empty_diffs = statuses.empty_with_metadata();
+                        Some((statuses, empty_diffs))
                     }
                 }
-            } else {
-                break;
             }
+            _ => None,
         }
-        None
     }
 
     fn receive_batch(&mut self, updates: EventBatch) -> Result<()> {
