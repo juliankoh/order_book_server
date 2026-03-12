@@ -30,14 +30,19 @@ use tokio::{
 };
 use yawc::{FrameView, OpCode, WebSocket};
 
-pub async fn run_websocket_server(address: &str, ignore_spot: bool, compression_level: u32) -> Result<()> {
+pub async fn run_websocket_server(
+    address: &str,
+    ignore_spot: bool,
+    compression_level: u32,
+    streaming: bool,
+) -> Result<()> {
     let (internal_message_tx, _) = channel::<Arc<InternalMessage>>(100);
 
     // Central task: listen to messages and forward them for distribution
     let home_dir = home_dir().ok_or("Could not find home directory")?;
     let listener = {
         let internal_message_tx = internal_message_tx.clone();
-        OrderBookListener::new(Some(internal_message_tx), ignore_spot)
+        OrderBookListener::new(Some(internal_message_tx), ignore_spot, streaming)
     };
     let listener = Arc::new(Mutex::new(listener));
     {
@@ -138,6 +143,16 @@ async fn handle_socket(
                             InternalMessage::OpenOrdersUpdate { changed_users } => {
                                 for sub in manager.subscriptions() {
                                     send_ws_data_from_open_orders(&mut socket, sub, changed_users).await;
+                                }
+                            },
+                            InternalMessage::StreamingBookDiffs { diffs, time, height } => {
+                                let mut updates = HashMap::new();
+                                for diff in diffs {
+                                    let coin = diff.coin().value();
+                                    updates.entry(coin).or_insert_with(|| L4BookUpdates::new(*time, *height)).book_diffs.push(diff.clone());
+                                }
+                                for sub in manager.subscriptions() {
+                                    send_ws_data_from_book_updates(&mut socket, sub, &mut updates).await;
                                 }
                             },
                         }

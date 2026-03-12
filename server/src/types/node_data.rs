@@ -100,4 +100,8 @@ impl<E> Batch<E> {
     pub(crate) fn events_ref(&self) -> &[E] {
         &self.events
     }
+
+    pub(crate) fn extend_events(&mut self, other: Self) {
+        self.events.extend(other.events);
+    }
 }

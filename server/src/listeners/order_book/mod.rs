@@ -189,6 +189,7 @@ fn fetch_snapshot(
 
 pub(crate) struct OrderBookListener {
     ignore_spot: bool,
+    streaming: bool,
     fill_status_file: Option<File>,
     order_status_file: Option<File>,
     order_diff_file: Option<File>,
@@ -205,9 +206,14 @@ pub(crate) struct OrderBookListener {
 }
 
 impl OrderBookListener {
-    pub(crate) fn new(internal_message_tx: Option<Sender<Arc<InternalMessage>>>, ignore_spot: bool) -> Self {
+    pub(crate) fn new(
+        internal_message_tx: Option<Sender<Arc<InternalMessage>>>,
+        ignore_spot: bool,
+        streaming: bool,
+    ) -> Self {
         Self {
             ignore_spot,
+            streaming,
             fill_status_file: None,
             order_status_file: None,
             order_diff_file: None,
@@ -236,6 +242,13 @@ impl OrderBookListener {
     #[allow(clippy::type_complexity)]
     // pops earliest pair of cached updates that have the same timestamp if possible
     fn pop_cache(&mut self) -> Option<(Batch<NodeDataOrderStatus>, Batch<NodeDataOrderDiff>)> {
+        // In streaming mode, only pop blocks that are known complete
+        // (a newer block exists behind them in the queue)
+        if self.streaming
+            && (!self.order_diff_cache.is_front_complete() || !self.order_status_cache.is_front_complete())
+        {
+            return None;
+        }
         // synchronize to same block
         while let Some(t) = self.order_diff_cache.front() {
             if let Some(s) = self.order_status_cache.front() {
@@ -266,6 +279,19 @@ impl OrderBookListener {
                 self.order_status_cache.push(batch);
             }
             EventBatch::BookDiffs(batch) => {
+                // In streaming mode, immediately forward raw diffs for low-latency consumption
+                if self.streaming {
+                    if let Some(tx) = &self.internal_message_tx {
+                        let tx = tx.clone();
+                        let diffs = batch.events_ref().to_vec();
+                        let time = batch.block_time();
+                        let height = batch.block_number();
+                        tokio::spawn(async move {
+                            let msg = Arc::new(InternalMessage::StreamingBookDiffs { diffs, time, height });
+                            let _unused = tx.send(msg);
+                        });
+                    }
+                }
                 self.order_diff_cache.push(batch);
             }
             EventBatch::Fills(batch) => {
@@ -571,6 +597,8 @@ pub(crate) enum InternalMessage {
     Fills { batch: Batch<NodeDataFill> },
     L4BookUpdates { diff_batch: Batch<NodeDataOrderDiff>, status_batch: Batch<NodeDataOrderStatus> },
     OpenOrdersUpdate { changed_users: HashMap<Address, Vec<L4Order>> },
+    /// Immediate intra-block order diffs forwarded in streaming mode (before block completion)
+    StreamingBookDiffs { diffs: Vec<NodeDataOrderDiff>, time: u64, height: u64 },
 }
 
 #[derive(Eq, PartialEq, Hash)]

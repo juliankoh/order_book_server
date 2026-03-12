@@ -124,6 +124,15 @@ pub(super) enum EventBatch {
     Fills(Batch<NodeDataFill>),
 }
 
+pub(super) enum PushResult {
+    /// A new block was started in the queue
+    NewBlock,
+    /// Events were merged into the existing last batch (same block number)
+    Merged,
+    /// The batch was stale (block number older than what we've seen)
+    Stale,
+}
+
 pub(super) struct BatchQueue<T> {
     deque: VecDeque<Batch<T>>,
     last_ts: Option<u64>,
@@ -134,15 +143,22 @@ impl<T> BatchQueue<T> {
         Self { deque: VecDeque::new(), last_ts: None }
     }
 
-    pub(super) fn push(&mut self, block: Batch<T>) -> bool {
+    pub(super) fn push(&mut self, block: Batch<T>) -> PushResult {
         if let Some(last_ts) = self.last_ts {
-            if last_ts >= block.block_number() {
-                return false;
+            if block.block_number() < last_ts {
+                return PushResult::Stale;
+            }
+            if block.block_number() == last_ts {
+                // Streaming mode: merge events into the existing batch for this block
+                if let Some(back) = self.deque.back_mut() {
+                    back.extend_events(block);
+                    return PushResult::Merged;
+                }
             }
         }
         self.last_ts = Some(block.block_number());
         self.deque.push_back(block);
-        true
+        PushResult::NewBlock
     }
 
     pub(super) fn pop_front(&mut self) -> Option<Batch<T>> {
@@ -151,5 +167,15 @@ impl<T> BatchQueue<T> {
 
     pub(super) fn front(&self) -> Option<&Batch<T>> {
         self.deque.front()
+    }
+
+    /// Returns true if the front block is complete (a newer block exists behind it)
+    pub(super) fn is_front_complete(&self) -> bool {
+        self.deque.len() >= 2
+    }
+
+    #[allow(dead_code)]
+    pub(super) fn len(&self) -> usize {
+        self.deque.len()
     }
 }

@@ -25,6 +25,12 @@ struct Args {
     /// documentation for <https://docs.rs/flate2/1.1.2/flate2/struct.Compression.html#method.new> for more info.
     #[arg(long)]
     websocket_compression_level: Option<u32>,
+
+    /// Enable streaming mode for use with hl-node's --stream-with-block-info flag.
+    /// In this mode, order diffs are forwarded to websocket clients immediately
+    /// as they arrive (intra-block), rather than waiting for block completion.
+    #[arg(long)]
+    streaming: bool,
 }
 
 #[tokio::main]
@@ -37,7 +43,7 @@ async fn main() -> Result<()> {
     println!("Running websocket server on {full_address}");
 
     let compression_level = args.websocket_compression_level.unwrap_or(/* Some compression */ 1);
-    run_websocket_server(&full_address, true, compression_level).await?;
+    run_websocket_server(&full_address, true, compression_level, args.streaming).await?;
 
     Ok(())
 }
