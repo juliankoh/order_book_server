@@ -122,7 +122,7 @@ impl OrderBookState {
                 }
             }
         }
-        self.height += 1;
+        self.height = height;
         self.time = time;
         self.snapped = false;
         Ok(())
