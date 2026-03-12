@@ -250,11 +250,12 @@ impl OrderBookListener {
             (Some(diffs), Some(statuses)) => {
                 match diffs.block_number().cmp(&statuses.block_number()) {
                     Ordering::Equal => {
-                        // In streaming mode, only pop when we know this block is complete
-                        // (a newer block exists in at least one cache)
+                        // In streaming mode, both caches must have a newer block
+                        // to guarantee no more events for this block will arrive
+                        // (status and diff files are written independently)
                         if self.streaming
-                            && !self.order_diff_cache.is_front_complete()
-                            && !self.order_status_cache.is_front_complete()
+                            && (!self.order_diff_cache.is_front_complete()
+                                || !self.order_status_cache.is_front_complete())
                         {
                             return None;
                         }
@@ -263,8 +264,8 @@ impl OrderBookListener {
                             .and_then(|t| self.order_diff_cache.pop_front().map(|s| (t, s)))
                     }
                     Ordering::Less => {
-                        // diffs block has no matching statuses — pair with empty statuses
-                        // The statuses cache having a newer block proves this diffs block is complete
+                        // Diffs block N has no matching statuses (statuses already at block M > N).
+                        // Still need diffs to be complete (a newer diff block exists).
                         if self.streaming && !self.order_diff_cache.is_front_complete() {
                             return None;
                         }
@@ -273,8 +274,8 @@ impl OrderBookListener {
                         Some((empty_statuses, diffs))
                     }
                     Ordering::Greater => {
-                        // statuses block has no matching diffs — pair with empty diffs
-                        // The diffs cache having a newer block proves this statuses block is complete
+                        // Statuses block N has no matching diffs (diffs already at block M > N).
+                        // Still need statuses to be complete (a newer status block exists).
                         if self.streaming && !self.order_status_cache.is_front_complete() {
                             return None;
                         }
@@ -283,17 +284,6 @@ impl OrderBookListener {
                         Some((statuses, empty_diffs))
                     }
                 }
-            }
-            // In streaming mode, one cache might have blocks the other doesn't
-            (Some(_), None) if self.streaming && self.order_diff_cache.is_front_complete() => {
-                let diffs = self.order_diff_cache.pop_front().unwrap();
-                let empty_statuses = diffs.empty_with_metadata();
-                Some((empty_statuses, diffs))
-            }
-            (None, Some(_)) if self.streaming && self.order_status_cache.is_front_complete() => {
-                let statuses = self.order_status_cache.pop_front().unwrap();
-                let empty_diffs = statuses.empty_with_metadata();
-                Some((statuses, empty_diffs))
             }
             _ => None,
         }
