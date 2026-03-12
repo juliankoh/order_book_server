@@ -70,10 +70,12 @@ pub(crate) async fn hl_listen(listener: Arc<Mutex<OrderBookListener>>, dir: Path
     watcher.watch(&order_diffs_dir, RecursiveMode::Recursive)?;
     let start = Instant::now() + Duration::from_secs(5);
     let mut ticker = interval_at(start, Duration::from_secs(10));
+    let mut received_fs_event = false;
     loop {
         tokio::select! {
             event = fs_event_rx.recv() =>  match event {
                 Some(Ok(event)) => {
+                    received_fs_event = true;
                     if event.kind.is_create() || event.kind.is_modify() {
                         let new_path = &event.paths[0];
                         if new_path.starts_with(&order_statuses_dir) && new_path.is_file() {
@@ -124,7 +126,7 @@ pub(crate) async fn hl_listen(listener: Arc<Mutex<OrderBookListener>>, dir: Path
             }
             () = sleep(Duration::from_secs(5)) => {
                 let listener = listener.lock().await;
-                if listener.is_ready() {
+                if listener.is_ready() && received_fs_event {
                     return Err(format!("Stream has fallen behind ({HL_NODE} failed?)").into());
                 }
             }
