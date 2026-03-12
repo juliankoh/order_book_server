@@ -31,16 +31,13 @@ mod tests {
         prelude::*,
     };
     use fs::{File, create_dir_all, read_dir, remove_dir_all, remove_file};
-    use log::{error, info};
-    use notify::{RecursiveMode, Watcher, recommended_watcher};
     use rand::{Rng, SeedableRng, rngs::StdRng};
     use std::{
-        io::{Seek, SeekFrom},
         path::{Path, PathBuf},
         sync::{Arc, Mutex},
         time::Duration,
     };
-    use tokio::{fs::File as TokioFile, io::AsyncWriteExt, sync::mpsc::unbounded_channel, time::sleep};
+    use tokio::{fs::File as TokioFile, io::AsyncWriteExt, time::sleep};
 
     const MOCK_HL_DIR: &str = "tmp/ws_listener_test";
     const DATA: [&str; 2] = [
@@ -73,64 +70,6 @@ mod tests {
 "#,
     ];
 
-    async fn listen<L: DirectoryListener>(listener: &mut L, event_source: EventSource, dir: &Path) -> Result<()> {
-        let event_source_dir = event_source.event_source_dir(dir).canonicalize()?;
-        info!("Monitoring directory: {}", event_source_dir.display());
-        // monitoring the directory via the notify crate (gives file system events)
-        let (fs_event_tx, mut fs_event_rx) = unbounded_channel();
-        let mut watcher = recommended_watcher(move |res| {
-            let fs_event_tx = fs_event_tx.clone();
-            if let Err(err) = fs_event_tx.send(res) {
-                error!("Error sending event to processor via channel: {err}");
-            }
-        })?;
-
-        watcher.watch(&event_source_dir, RecursiveMode::Recursive)?;
-        loop {
-            match fs_event_rx.recv().await {
-                Some(Ok(event)) => {
-                    // if a new file is created, start tracking it.
-                    if event.kind.is_create() {
-                        let new_path = &event.paths[0];
-                        if new_path.is_file() {
-                            info!("-- Event: {} created --", new_path.display());
-                            listener.on_file_creation(new_path.clone(), event_source)?;
-                        }
-                    }
-                    // Check for `Modify` event (only if the file is already initialized)
-                    else if event.kind.is_modify() {
-                        let new_path = &event.paths[0];
-                        if new_path.is_file() {
-                            // If we are not tracking anything right now, we treat a file update as declaring that it has been created.
-                            // Unfortunately, we miss the update that occurs at this time step.
-                            // We go to the end of the file to read for updates after that.
-                            if listener.is_reading(event_source) {
-                                info!("-- Event: {} modified --", new_path.display());
-                                listener.on_file_modification(event_source)?;
-                            } else {
-                                info!("-- Event: {} created --", new_path.display());
-                                let file = listener.file_mut(event_source);
-                                let mut new_file = File::open(new_path)?;
-                                new_file.seek(SeekFrom::End(0))?;
-                                *file = Some(new_file);
-                            }
-                        }
-                    }
-                }
-                Some(Err(err)) => {
-                    error!("Watcher error: {err}");
-                    return Err(Box::new(err));
-                }
-                None => {
-                    // The channel disconnected, likely because the sender (watcher) was dropped.
-                    // This usually means the program is shutting down or there's a problem.
-                    error!("Channel closed. Listener exiting");
-                    return Err("Channel closed.".into()); // Exit the loop
-                }
-            }
-        }
-    }
-
     fn clear_dir_contents(path: &Path) -> Result<()> {
         if path.is_dir() {
             for entry in read_dir(path)? {
@@ -146,7 +85,11 @@ mod tests {
         Ok(())
     }
 
-    async fn create_mock_data(event_source: EventSource, mock_dir: &Path) -> Result<String> {
+    async fn create_mock_data<L: DirectoryListener>(
+        listener: &mut L,
+        event_source: EventSource,
+        mock_dir: &Path,
+    ) -> Result<String> {
         // set up so that the directory is initially empty
         let mut res = String::new();
         sleep(Duration::from_millis(100)).await;
@@ -160,10 +103,13 @@ mod tests {
         for (i, data) in DATA.iter().enumerate() {
             res += data;
             let lines = data.split_whitespace();
-            let mut mock_file = TokioFile::create(mock_dir.join((i + 1).to_string())).await?;
+            let file_path = mock_dir.join((i + 1).to_string());
+            let mut mock_file = TokioFile::create(&file_path).await?;
+            listener.on_file_creation(file_path, event_source)?;
             for line in lines {
                 mock_file.write_all((line.to_string() + "\n").as_bytes()).await?;
                 mock_file.flush().await?;
+                listener.on_file_modification(event_source)?;
                 let wait = rng.random_bool(0.25);
                 // simulate writing transactions in separate blocks by waiting 0.1 seconds.
                 if wait {
@@ -218,18 +164,9 @@ mod tests {
         create_dir_all(event_source.event_source_dir(&mock_path))?;
         let history = Arc::new(Mutex::new(String::new()));
         let mut test_listener = TestListener::new(history.clone());
-        {
-            let mock_path = mock_path.clone();
-            tokio::spawn(async move {
-                if let Err(err) = listen(&mut test_listener, event_source, &mock_path).await {
-                    error!("Listener error: {err}");
-                }
-            });
-        }
 
         // get desired output
-        let expected = create_mock_data(event_source, &mock_path).await?;
-        sleep(Duration::from_secs(2)).await;
+        let expected = create_mock_data(&mut test_listener, event_source, &mock_path).await?;
         let history = history.lock().unwrap();
         assert_eq!(*history, expected);
         Ok(())

@@ -79,6 +79,10 @@ pub(crate) async fn hl_listen(listener: Arc<Mutex<OrderBookListener>>, dir: Path
                     received_fs_event = true;
                     if event.kind.is_create() || event.kind.is_modify() {
                         let new_path = &event.paths[0];
+                        if new_path.is_dir() {
+                            watcher.watch(new_path, RecursiveMode::Recursive)?;
+                            continue;
+                        }
                         if new_path.starts_with(&order_statuses_dir) && new_path.is_file() {
                             listener
                                 .lock()
@@ -199,6 +203,9 @@ pub(crate) struct OrderBookListener {
     // None if we haven't seen a valid snapshot yet
     order_book_state: Option<OrderBookState>,
     last_fill: Option<u64>,
+    fill_pending: String,
+    order_status_pending: String,
+    order_diff_pending: String,
     order_diff_cache: BatchQueue<NodeDataOrderDiff>,
     order_status_cache: BatchQueue<NodeDataOrderStatus>,
     // Only Some when we want it to collect updates
@@ -222,6 +229,9 @@ impl OrderBookListener {
             order_diff_file: None,
             order_book_state: None,
             last_fill: None,
+            fill_pending: String::new(),
+            order_status_pending: String::new(),
+            order_diff_pending: String::new(),
             fetched_snapshot_cache: None,
             internal_message_tx,
             order_diff_cache: BatchQueue::new(),
@@ -298,14 +308,11 @@ impl OrderBookListener {
                 // In streaming mode, immediately forward raw diffs for low-latency consumption
                 if self.streaming {
                     if let Some(tx) = &self.internal_message_tx {
-                        let tx = tx.clone();
                         let diffs = batch.events_ref().to_vec();
                         let time = batch.block_time();
                         let height = batch.block_number();
-                        tokio::spawn(async move {
-                            let msg = Arc::new(InternalMessage::StreamingBookDiffs { diffs, time, height });
-                            let _unused = tx.send(msg);
-                        });
+                        let msg = Arc::new(InternalMessage::StreamingBookDiffs { diffs, time, height });
+                        let _unused = tx.send(msg);
                     }
                 }
                 self.order_diff_cache.push(batch);
@@ -314,17 +321,14 @@ impl OrderBookListener {
                 if self.last_fill.is_none_or(|height| height < batch.block_number()) {
                     // send fill updates if we received a new update
                     if let Some(tx) = &self.internal_message_tx {
-                        let tx = tx.clone();
-                        tokio::spawn(async move {
-                            let snapshot = Arc::new(InternalMessage::Fills { batch });
-                            let _unused = tx.send(snapshot);
-                        });
+                        let snapshot = Arc::new(InternalMessage::Fills { batch });
+                        let _unused = tx.send(snapshot);
                     }
                 }
             }
         }
         if self.is_ready() {
-            if let Some((order_statuses, order_diffs)) = self.pop_cache() {
+            while let Some((order_statuses, order_diffs)) = self.pop_cache() {
                 self.order_book_state
                     .as_mut()
                     .map(|book| book.apply_updates(order_statuses.clone(), order_diffs.clone()))
@@ -335,7 +339,6 @@ impl OrderBookListener {
                 // Update open orders state and collect changed users
                 let changed_users = self.update_open_orders(&order_statuses, &order_diffs);
                 if let Some(tx) = &self.internal_message_tx {
-                    let tx = tx.clone();
                     let open_orders_update = if !changed_users.is_empty() {
                         let mut updates = HashMap::new();
                         for user in &changed_users {
@@ -345,17 +348,15 @@ impl OrderBookListener {
                     } else {
                         None
                     };
-                    tokio::spawn(async move {
-                        let updates = Arc::new(InternalMessage::L4BookUpdates {
-                            diff_batch: order_diffs,
-                            status_batch: order_statuses,
-                        });
-                        let _unused = tx.send(updates);
-                        if let Some(oo_updates) = open_orders_update {
-                            let msg = Arc::new(InternalMessage::OpenOrdersUpdate { changed_users: oo_updates });
-                            let _unused = tx.send(msg);
-                        }
+                    let updates = Arc::new(InternalMessage::L4BookUpdates {
+                        diff_batch: order_diffs,
+                        status_batch: order_statuses,
                     });
+                    let _unused = tx.send(updates);
+                    if let Some(oo_updates) = open_orders_update {
+                        let msg = Arc::new(InternalMessage::OpenOrdersUpdate { changed_users: oo_updates });
+                        let _unused = tx.send(msg);
+                    }
                 }
             }
         }
@@ -379,10 +380,7 @@ impl OrderBookListener {
             for side_orders in book.as_ref() {
                 for order in side_orders {
                     let l4_order = L4Order::from(order.clone());
-                    self.open_orders
-                        .entry(order.user)
-                        .or_default()
-                        .insert(order.oid, l4_order);
+                    self.open_orders.entry(order.user).or_default().insert(order.oid, l4_order);
                 }
             }
         }
@@ -419,10 +417,15 @@ impl OrderBookListener {
 
     /// Returns the current open orders for a given user address
     pub(crate) fn get_open_orders(&self, user: &Address) -> Vec<L4Order> {
-        self.open_orders
-            .get(user)
-            .map(|orders| orders.values().cloned().collect())
-            .unwrap_or_default()
+        self.open_orders.get(user).map(|orders| orders.values().cloned().collect()).unwrap_or_default()
+    }
+
+    fn pending_mut(&mut self, event_source: EventSource) -> &mut String {
+        match event_source {
+            EventSource::Fills => &mut self.fill_pending,
+            EventSource::OrderStatuses => &mut self.order_status_pending,
+            EventSource::OrderDiffs => &mut self.order_diff_pending,
+        }
     }
 
     /// Applies order status and book diff events to the open orders map.
@@ -453,10 +456,7 @@ impl OrderBookListener {
                         let mut order = status.order.clone();
                         order.user = Some(status.user);
                         order.sz = sz.clone();
-                        self.open_orders
-                            .entry(status.user)
-                            .or_default()
-                            .insert(oid, order);
+                        self.open_orders.entry(status.user).or_default().insert(oid, order);
                         changed_users.insert(status.user);
                     }
                 }
@@ -490,6 +490,9 @@ impl OrderBookListener {
         if event.kind.is_create() {
             info!("-- Event: {} created --", new_path.display());
             self.on_file_creation(new_path.clone(), event_source)?;
+            // Some platforms deliver create after bytes have already been written.
+            // Read the new file once immediately so we do not miss its initial contents.
+            self.on_file_modification(event_source)?;
         }
         // Check for `Modify` event (only if the file is already initialized)
         else {
@@ -504,6 +507,7 @@ impl OrderBookListener {
                 let mut new_file = File::open(new_path)?;
                 new_file.seek(SeekFrom::End(0))?;
                 *file = Some(new_file);
+                self.pending_mut(event_source).clear();
             }
         }
         Ok(())
@@ -534,59 +538,81 @@ impl DirectoryListener for OrderBookListener {
             if !buf.is_empty() {
                 self.process_data(buf, event_source)?;
             }
+            if !self.pending_mut(event_source).is_empty() {
+                let tail = std::mem::take(self.pending_mut(event_source));
+                self.process_data(format!("{tail}\n"), event_source)?;
+                if !self.pending_mut(event_source).is_empty() {
+                    return Err(format!("{event_source} file ended with a partial JSON record").into());
+                }
+            }
         }
         *self.file_mut(event_source) = Some(File::open(new_file)?);
+        self.pending_mut(event_source).clear();
         Ok(())
     }
 
     fn process_data(&mut self, data: String, event_source: EventSource) -> Result<()> {
-        let total_len = data.len();
-        let lines = data.lines();
-        for line in lines {
+        let mut pending = std::mem::take(self.pending_mut(event_source));
+        pending.push_str(&data);
+
+        loop {
+            let Some(newline_idx) = pending.find('\n') else {
+                break;
+            };
+
+            let mut line = pending.drain(..=newline_idx).collect::<String>();
+            if line.ends_with('\n') {
+                line.pop();
+            }
+            if line.ends_with('\r') {
+                line.pop();
+            }
             if line.is_empty() {
                 continue;
             }
+
             let res = match event_source {
-                EventSource::Fills => serde_json::from_str::<Batch<NodeDataFill>>(line).map(|batch| {
+                EventSource::Fills => serde_json::from_str::<Batch<NodeDataFill>>(&line).map(|batch| {
                     let height = batch.block_number();
                     (height, EventBatch::Fills(batch))
                 }),
-                EventSource::OrderStatuses => serde_json::from_str(line)
+                EventSource::OrderStatuses => serde_json::from_str(&line)
                     .map(|batch: Batch<NodeDataOrderStatus>| (batch.block_number(), EventBatch::Orders(batch))),
-                EventSource::OrderDiffs => serde_json::from_str(line)
+                EventSource::OrderDiffs => serde_json::from_str(&line)
                     .map(|batch: Batch<NodeDataOrderDiff>| (batch.block_number(), EventBatch::BookDiffs(batch))),
             };
+
             let (height, event_batch) = match res {
                 Ok(data) => data,
                 Err(err) => {
-                    // if we run into a serialization error (hitting EOF), just return to last line.
+                    let preview = line.chars().take(100).collect::<String>();
                     error!(
                         "{event_source} serialization error {err}, height: {:?}, line: {:?}",
                         self.order_book_state.as_ref().map(OrderBookState::height),
-                        &line[..100],
+                        preview,
                     );
-                    #[allow(clippy::unwrap_used)]
-                    let total_len: i64 = total_len.try_into().unwrap();
-                    self.file_mut(event_source).as_mut().map(|f| f.seek_relative(-total_len));
-                    break;
+                    *self.pending_mut(event_source) = pending;
+                    return Err(format!("{event_source} serialization error: {err}").into());
                 }
             };
+
             if height % 100 == 0 {
                 info!("{event_source} block: {height}");
             }
             if let Err(err) = self.receive_batch(event_batch) {
                 self.order_book_state = None;
+                *self.pending_mut(event_source) = pending;
                 return Err(err);
             }
         }
+
+        *self.pending_mut(event_source) = pending;
+
         let snapshot = self.l2_snapshots(true);
         if let Some(snapshot) = snapshot {
             if let Some(tx) = &self.internal_message_tx {
-                let tx = tx.clone();
-                tokio::spawn(async move {
-                    let snapshot = Arc::new(InternalMessage::Snapshot { l2_snapshots: snapshot.1, time: snapshot.0 });
-                    let _unused = tx.send(snapshot);
-                });
+                let snapshot = Arc::new(InternalMessage::Snapshot { l2_snapshots: snapshot.1, time: snapshot.0 });
+                let _unused = tx.send(snapshot);
             }
         }
         Ok(())
@@ -609,12 +635,26 @@ pub(crate) struct TimedSnapshots {
 
 // Messages sent from node data listener to websocket dispatch to support streaming
 pub(crate) enum InternalMessage {
-    Snapshot { l2_snapshots: L2Snapshots, time: u64 },
-    Fills { batch: Batch<NodeDataFill> },
-    L4BookUpdates { diff_batch: Batch<NodeDataOrderDiff>, status_batch: Batch<NodeDataOrderStatus> },
-    OpenOrdersUpdate { changed_users: HashMap<Address, Vec<L4Order>> },
+    Snapshot {
+        l2_snapshots: L2Snapshots,
+        time: u64,
+    },
+    Fills {
+        batch: Batch<NodeDataFill>,
+    },
+    L4BookUpdates {
+        diff_batch: Batch<NodeDataOrderDiff>,
+        status_batch: Batch<NodeDataOrderStatus>,
+    },
+    OpenOrdersUpdate {
+        changed_users: HashMap<Address, Vec<L4Order>>,
+    },
     /// Immediate intra-block order diffs forwarded in streaming mode (before block completion)
-    StreamingBookDiffs { diffs: Vec<NodeDataOrderDiff>, time: u64, height: u64 },
+    StreamingBookDiffs {
+        diffs: Vec<NodeDataOrderDiff>,
+        time: u64,
+        height: u64,
+    },
 }
 
 #[derive(Eq, PartialEq, Hash)]

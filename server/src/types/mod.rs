@@ -57,6 +57,14 @@ pub(crate) enum L4Book {
     Updates(L4BookUpdates),
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct L4BookStream {
+    pub coin: String,
+    pub time: u64,
+    pub height: u64,
+    pub book_diffs: Vec<NodeDataOrderDiff>,
+}
+
 impl L2Book {
     pub(crate) const fn from_l2_snapshot(coin: String, snapshot: [Vec<Level>; 2], time: u64) -> Self {
         Self { coin, time, levels: snapshot }

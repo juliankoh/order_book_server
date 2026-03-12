@@ -1,5 +1,5 @@
+use crate::types::{L2Book, L4Book, L4BookStream, OpenOrdersData, Trade};
 use alloy::primitives::Address;
-use crate::types::{L2Book, L4Book, OpenOrdersData, Trade};
 use log::info;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -25,6 +25,8 @@ pub(crate) enum Subscription {
     L2Book { coin: String, n_sig_figs: Option<u32>, n_levels: Option<usize>, mantissa: Option<u64> },
     #[serde(rename_all = "camelCase")]
     L4Book { coin: String },
+    #[serde(rename_all = "camelCase")]
+    L4BookStream { coin: String },
     #[serde(rename_all = "camelCase")]
     OpenOrders { user: String },
 }
@@ -64,7 +66,7 @@ impl Subscription {
                 info!("Valid subscription");
                 true
             }
-            Self::L4Book { coin } => {
+            Self::L4Book { coin } | Self::L4BookStream { coin } => {
                 if !universe.contains(coin) || coin.starts_with('@') {
                     info!("Invalid subscription: coin not found");
                     return false;
@@ -92,6 +94,7 @@ pub(crate) enum ServerResponse {
     SubscriptionResponse(ClientMessage),
     L2Book(L2Book),
     L4Book(L4Book),
+    L4BookStream(L4BookStream),
     Trades(Vec<Trade>),
     OpenOrders(OpenOrdersData),
     Error(String),
@@ -150,6 +153,15 @@ mod test {
     }
 
     #[test]
+    fn test_message_deserialization_l4book_stream() {
+        let message = r#"
+            {"channel":"l4BookStream","data":{"coin":"BTC","time":1751430933565,"height":123,"book_diffs":[]}}
+        "#;
+        let msg: ServerResponse = serde_json::from_str(message).unwrap();
+        assert!(matches!(msg, ServerResponse::L4BookStream(_)));
+    }
+
+    #[test]
     fn test_client_message_deserialization() {
         let message = r#"
             { "method": "subscribe", "subscription":{ "type": "l2Book", "coin": "BTC" }}
@@ -161,5 +173,14 @@ mod test {
                 subscription: Subscription::L2Book { n_sig_figs: None, n_levels: None, mantissa: None, .. },
             }
         ));
+    }
+
+    #[test]
+    fn test_client_message_deserialization_l4book_stream() {
+        let message = r#"
+            { "method": "subscribe", "subscription":{ "type": "l4BookStream", "coin": "BTC" }}
+        "#;
+        let msg: ClientMessage = serde_json::from_str(message).unwrap();
+        assert!(matches!(msg, ClientMessage::Subscribe { subscription: Subscription::L4BookStream { .. } }));
     }
 }

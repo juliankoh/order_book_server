@@ -65,6 +65,7 @@ pub(crate) enum EventSource {
 }
 
 impl EventSource {
+    #[cfg_attr(not(test), allow(dead_code))]
     #[must_use]
     pub(crate) fn event_source_dir(self, dir: &Path) -> PathBuf {
         self.event_source_dir_streaming(dir, false)
@@ -112,6 +113,11 @@ impl<E> Batch<E> {
     }
 
     pub(crate) fn empty_with_metadata<T>(&self) -> Batch<T> {
-        Batch { local_time: self.local_time, block_time: self.block_time, block_number: self.block_number, events: Vec::new() }
+        Batch {
+            local_time: self.local_time,
+            block_time: self.block_time,
+            block_number: self.block_number,
+            events: Vec::new(),
+        }
     }
 }

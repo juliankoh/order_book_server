@@ -5,7 +5,7 @@ use crate::{
     order_book::{Coin, Snapshot},
     prelude::*,
     types::{
-        L2Book, L4Book, L4BookUpdates, L4Order, OpenOrdersData, Trade,
+        L2Book, L4Book, L4BookStream, L4BookUpdates, L4Order, OpenOrdersData, Trade,
         inner::InnerLevel,
         node_data::{Batch, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
         subscription::{ClientMessage, DEFAULT_LEVELS, ServerResponse, Subscription, SubscriptionManager},
@@ -36,7 +36,7 @@ pub async fn run_websocket_server(
     compression_level: u32,
     streaming: bool,
 ) -> Result<()> {
-    let (internal_message_tx, _) = channel::<Arc<InternalMessage>>(100);
+    let (internal_message_tx, _) = channel::<Arc<InternalMessage>>(4096);
 
     // Central task: listen to messages and forward them for distribution
     let home_dir = home_dir().ok_or("Could not find home directory")?;
@@ -146,13 +146,9 @@ async fn handle_socket(
                                 }
                             },
                             InternalMessage::StreamingBookDiffs { diffs, time, height } => {
-                                let mut updates = HashMap::new();
-                                for diff in diffs {
-                                    let coin = diff.coin().value();
-                                    updates.entry(coin).or_insert_with(|| L4BookUpdates::new(*time, *height)).book_diffs.push(diff.clone());
-                                }
+                                let mut updates = coin_to_streaming_book_updates(diffs, *time, *height);
                                 for sub in manager.subscriptions() {
-                                    send_ws_data_from_book_updates(&mut socket, sub, &mut updates).await;
+                                    send_ws_data_from_streaming_book_updates(&mut socket, sub, &mut updates).await;
                                 }
                             },
                         }
@@ -339,6 +335,23 @@ fn coin_to_book_updates(
     updates
 }
 
+fn coin_to_streaming_book_updates(
+    diffs: &[NodeDataOrderDiff],
+    time: u64,
+    height: u64,
+) -> HashMap<String, L4BookStream> {
+    let mut updates = HashMap::new();
+    for diff in diffs {
+        let coin = diff.coin().value();
+        updates
+            .entry(coin.clone())
+            .or_insert_with(|| L4BookStream { coin, time, height, book_diffs: Vec::new() })
+            .book_diffs
+            .push(diff.clone());
+    }
+    updates
+}
+
 async fn send_ws_data_from_book_updates(
     socket: &mut WebSocket,
     subscription: &Subscription,
@@ -352,6 +365,19 @@ async fn send_ws_data_from_book_updates(
     }
 }
 
+async fn send_ws_data_from_streaming_book_updates(
+    socket: &mut WebSocket,
+    subscription: &Subscription,
+    book_updates: &mut HashMap<String, L4BookStream>,
+) {
+    if let Subscription::L4BookStream { coin } = subscription {
+        if let Some(updates) = book_updates.remove(coin) {
+            let msg = ServerResponse::L4BookStream(updates);
+            send_socket_message(socket, msg).await;
+        }
+    }
+}
+
 async fn send_ws_data_from_open_orders(
     socket: &mut WebSocket,
     subscription: &Subscription,
@@ -360,10 +386,7 @@ async fn send_ws_data_from_open_orders(
     if let Subscription::OpenOrders { user } = subscription {
         if let Ok(addr) = user.parse::<Address>() {
             if let Some(orders) = changed_users.get(&addr) {
-                let msg = ServerResponse::OpenOrders(OpenOrdersData {
-                    user: addr,
-                    open_orders: orders.clone(),
-                });
+                let msg = ServerResponse::OpenOrders(OpenOrdersData { user: addr, open_orders: orders.clone() });
                 send_socket_message(socket, msg).await;
             }
         }
@@ -410,10 +433,7 @@ impl Subscription {
         if let Self::OpenOrders { user } = self {
             let addr = user.parse::<Address>().map_err(|e| format!("Invalid address: {e}"))?;
             let orders = listener.lock().await.get_open_orders(&addr);
-            return Ok(Some(ServerResponse::OpenOrders(OpenOrdersData {
-                user: addr,
-                open_orders: orders,
-            })));
+            return Ok(Some(ServerResponse::OpenOrders(OpenOrdersData { user: addr, open_orders: orders })));
         }
         Ok(None)
     }

@@ -8,6 +8,7 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 enum Subscription {
     L2Book,
     L4Book,
+    L4BookStream,
     Trades,
     OpenOrders,
 }
@@ -23,7 +24,7 @@ struct Args {
     #[arg(long)]
     port: u16,
 
-    /// Subscription type: l2-book, l4-book, trades, open-orders
+    /// Subscription type: l2-book, l4-book, l4-book-stream, trades, open-orders
     #[arg(long, value_enum, default_value_t = Subscription::L2Book)]
     subscription: Subscription,
 
@@ -48,16 +49,16 @@ async fn main() -> Result<()> {
     let l2_book_sub =
         r#"{"method":"subscribe","subscription":{"type":"l2Book","coin":"BTC","nSigFigs":5,"mantissa":5}}"#;
     let l4_book_sub = r#"{"method":"subscribe","subscription":{"type":"l4Book","coin":"BTC"}}"#;
+    let l4_book_stream_sub = r#"{"method":"subscribe","subscription":{"type":"l4BookStream","coin":"BTC"}}"#;
     let trades_sub = r#"{"method":"subscribe","subscription":{"type":"trades","coin":"BTC"}}"#;
-    let open_orders_sub = format!(
-        r#"{{"method":"subscribe","subscription":{{"type":"openOrders","user":"{}"}}}}"#,
-        args.user
-    );
+    let open_orders_sub =
+        format!(r#"{{"method":"subscribe","subscription":{{"type":"openOrders","user":"{}"}}}}"#, args.user);
 
     // Choose subscription
     match args.subscription {
         Subscription::L2Book => write.send(Message::Text(l2_book_sub.into())).await?,
         Subscription::L4Book => write.send(Message::Text(l4_book_sub.into())).await?,
+        Subscription::L4BookStream => write.send(Message::Text(l4_book_stream_sub.into())).await?,
         Subscription::Trades => write.send(Message::Text(trades_sub.into())).await?,
         Subscription::OpenOrders => write.send(Message::Text(open_orders_sub.into())).await?,
     }
