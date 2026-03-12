@@ -10,6 +10,7 @@ use crate::{
         node_data::{Batch, NodeDataOrderDiff, NodeDataOrderStatus},
     },
 };
+use log::warn;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 #[derive(Clone)]
@@ -70,8 +71,9 @@ impl OrderBookState {
         let time = order_statuses.block_time();
         assert_eq!(order_statuses.block_number(), order_diffs.block_number());
         if height > self.height + 1 {
-            return Err(format!("Expecting block {}, got block {}", self.height + 1, height).into());
-        } else if height <= self.height {
+            warn!("Skipped {} blocks (expected {}, got {})", height - self.height - 1, self.height + 1, height);
+        }
+        if height <= self.height {
             // This is not an error in case we started caching long before a snapshot is fetched
             return Ok(());
         }
