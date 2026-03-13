@@ -5,7 +5,8 @@ LOG_DIR = $(HOME)/hl-monitor/logs
 NODE_LOG = $(LOG_DIR)/node.log
 OB_LOG = $(LOG_DIR)/ob-server.log
 
-.PHONY: install start start-node start-ob start-supervisor stop stop-node stop-ob stop-supervisor \
+.PHONY: install start start-streaming start-node start-node-streaming start-ob start-ob-streaming start-supervisor \
+        stop stop-node stop-ob stop-supervisor \
         restart restart-node restart-ob build-ob status health watch logs-node logs-ob logs-supervisor \
         prune update-peers update-visor disk nuke help check-names
 
@@ -56,6 +57,37 @@ start-supervisor: ## Start the supervisor daemon in tmux
 		echo "Starting supervisor in tmux session '$(TMUX_SUPERVISOR)'..."; \
 		tmux new-session -d -s $(TMUX_SUPERVISOR) 'bash scripts/supervisor.sh'; \
 		echo "Supervisor started."; \
+	fi
+
+start-streaming: update-peers start-node-streaming start-ob-streaming start-supervisor ## Start everything in streaming mode
+	@echo ""
+	@echo "All services started (streaming mode). Opening log view..."
+	@echo "(Ctrl+B, D to detach without stopping services)"
+	@sleep 1
+	@$(MAKE) watch
+
+start-node-streaming: ## Start the HL node in streaming mode
+	@mkdir -p $(LOG_DIR)
+	@if tmux has-session -t $(TMUX_NODE) 2>/dev/null; then \
+		echo "Node session '$(TMUX_NODE)' already running"; \
+	else \
+		echo "Starting HL node in tmux session '$(TMUX_NODE)' (streaming mode)..."; \
+		tmux new-session -d -s $(TMUX_NODE) -c $(HOME) \
+			'exec $(VISOR_BIN) run-non-validator $(NODE_FLAGS_STREAMING) 2>&1'; \
+		tmux pipe-pane -t $(TMUX_NODE) -o 'cat >> $(NODE_LOG)'; \
+		echo "Node started (streaming). Logs: $(NODE_LOG)"; \
+	fi
+
+start-ob-streaming: ## Start the OB server in streaming mode
+	@mkdir -p $(LOG_DIR)
+	@if tmux has-session -t $(TMUX_OB) 2>/dev/null; then \
+		echo "OB server session '$(TMUX_OB)' already running"; \
+	else \
+		echo "Starting OB server in tmux session '$(TMUX_OB)' (streaming mode)..."; \
+		tmux new-session -d -s $(TMUX_OB) -c $(HOME) \
+			'while true; do RUST_LOG=info $(OB_SERVER_BIN) --address $(OB_SERVER_ADDRESS) --port $(OB_SERVER_PORT) --streaming 2>&1; echo "OB server exited, restarting in $(OB_RESTART_DELAY)s..."; sleep $(OB_RESTART_DELAY); done'; \
+		tmux pipe-pane -t $(TMUX_OB) -o 'cat >> $(OB_LOG)'; \
+		echo "OB server started (streaming, with restart loop). Logs: $(OB_LOG)"; \
 	fi
 
 stop: stop-supervisor stop-ob stop-node ## Stop everything gracefully

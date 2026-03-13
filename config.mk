@@ -14,7 +14,8 @@ NVME_DEVICE = /dev/nvme1n1
 NVME_MOUNT = /mnt/hl-data
 
 # ─── Node flags ───────────────────────────────────────────
-NODE_FLAGS = --write-raw-book-diffs --write-order-statuses --write-fills --stream-with-block-info --disable-output-file-buffering --serve-eth-rpc --serve-info
+NODE_FLAGS = --write-raw-book-diffs --write-order-statuses --write-fills --batch-by-block --serve-eth-rpc --serve-info
+NODE_FLAGS_STREAMING = --write-raw-book-diffs --write-order-statuses --write-fills --stream-with-block-info --disable-output-file-buffering --serve-eth-rpc --serve-info
 
 # ─── Health thresholds ────────────────────────────────────
 MAX_BLOCK_LAG = 50
