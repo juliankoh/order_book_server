@@ -1,5 +1,5 @@
 use crate::{
-    order_book::{Coin, InnerOrder, Oid, OrderBook, Snapshot, Sz},
+    order_book::{Coin, InnerOrder, Oid, OrderBook, Px, Snapshot, Sz},
     prelude::*,
 };
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
@@ -58,6 +58,20 @@ impl<O: InnerOrder> OrderBooks<O> {
     // change size to reflect how much gets matched during the block
     pub(crate) fn modify_sz(&mut self, oid: Oid, coin: Coin, sz: Sz) -> bool {
         self.order_books.get_mut(&coin).is_some_and(|book| book.modify_sz(oid, sz))
+    }
+}
+
+impl<O: InnerOrder> OrderBooks<O> {
+    /// Returns the Nth price level boundary for each coin: [bid_floor, ask_ceiling].
+    /// Diffs with prices within these boundaries are near the top of book.
+    pub(crate) fn price_boundaries(&self, n_levels: usize) -> HashMap<Coin, [Option<Px>; 2]> {
+        self.order_books
+            .iter()
+            .map(|(coin, book)| {
+                let boundaries = book.price_boundaries(n_levels);
+                (coin.clone(), boundaries)
+            })
+            .collect()
     }
 }
 

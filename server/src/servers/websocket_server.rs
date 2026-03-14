@@ -2,12 +2,12 @@ use crate::{
     listeners::order_book::{
         InternalMessage, L2SnapshotParams, L2Snapshots, OrderBookListener, TimedSnapshots, hl_listen,
     },
-    order_book::{Coin, Snapshot},
+    order_book::{Coin, Px, Snapshot},
     prelude::*,
     types::{
         L2Book, L4Book, L4BookStream, L4BookUpdates, L4Order, OpenOrdersData, Trade,
         inner::{InnerL4Order, InnerLevel},
-        node_data::{Batch, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
+        node_data::{Batch, NodeDataFill, NodeDataOrderDiff},
         subscription::{ClientMessage, DEFAULT_LEVELS, ServerResponse, Subscription, SubscriptionManager},
     },
 };
@@ -264,8 +264,8 @@ async fn handle_socket(
                                 }
                                 ok
                             },
-                            InternalMessage::L4BookUpdates{ diff_batch, status_batch } => {
-                                let mut book_updates = coin_to_book_updates(diff_batch, status_batch);
+                            InternalMessage::L4BookUpdates{ diff_batch, price_boundaries } => {
+                                let mut book_updates = coin_to_book_updates(diff_batch, price_boundaries);
                                 let mut ok = true;
                                 for sub in manager.l4_books() {
                                     if !send_ws_data_from_book_updates(&mut socket, sub, &mut book_updates).await {
@@ -443,18 +443,26 @@ fn coin_to_trades(batch: &Batch<NodeDataFill>) -> HashMap<String, Vec<Trade>> {
 
 fn coin_to_book_updates(
     diff_batch: &Batch<NodeDataOrderDiff>,
-    status_batch: &Batch<NodeDataOrderStatus>,
+    price_boundaries: &HashMap<Coin, [Option<Px>; 2]>,
 ) -> HashMap<String, L4BookUpdates> {
     let time = diff_batch.block_time();
     let height = diff_batch.block_number();
     let mut updates = HashMap::new();
     for diff in diff_batch.events_ref() {
-        let coin = diff.coin().value();
+        let coin = diff.coin();
+        // Filter: only include diffs near top of book
+        if let Some([bid_floor, ask_ceiling]) = price_boundaries.get(&coin) {
+            if let Ok(px) = Px::parse_from_str(diff.px()) {
+                let dominated_by_bids = bid_floor.is_some_and(|b| px < b);
+                let dominated_by_asks = ask_ceiling.is_some_and(|a| px > a);
+                if dominated_by_bids && dominated_by_asks {
+                    continue;
+                }
+            }
+            // on parse failure, include conservatively
+        }
+        let coin = coin.value();
         updates.entry(coin).or_insert_with(|| L4BookUpdates::new(time, height)).book_diffs.push(diff.clone());
-    }
-    for status in status_batch.events_ref() {
-        let coin = status.order.coin.clone();
-        updates.entry(coin).or_insert_with(|| L4BookUpdates::new(time, height)).order_statuses.push(status.clone());
     }
     updates
 }
@@ -535,7 +543,7 @@ async fn send_ws_data_from_trades(
 }
 
 /// Maximum number of price levels to include in an L4Book initial snapshot.
-const L4_SNAPSHOT_MAX_LEVELS: usize = 20;
+const L4_SNAPSHOT_MAX_LEVELS: usize = 10;
 
 /// Truncate a list of orders (sorted by price priority) to the top N distinct price levels.
 fn truncate_to_n_levels(orders: Vec<InnerL4Order>, n_levels: usize) -> Vec<InnerL4Order> {

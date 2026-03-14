@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     order_book::types::Side,
-    types::node_data::{NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
+    types::node_data::{NodeDataFill, NodeDataOrderDiff},
 };
 
 pub(crate) mod inner;
@@ -95,13 +95,12 @@ impl Trade {
 pub(crate) struct L4BookUpdates {
     pub time: u64,
     pub height: u64,
-    pub order_statuses: Vec<NodeDataOrderStatus>,
     pub book_diffs: Vec<NodeDataOrderDiff>,
 }
 
 impl L4BookUpdates {
     pub(crate) const fn new(time: u64, height: u64) -> Self {
-        Self { time, height, order_statuses: Vec::new(), book_diffs: Vec::new() }
+        Self { time, height, book_diffs: Vec::new() }
     }
 }
 

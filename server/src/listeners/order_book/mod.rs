@@ -2,7 +2,7 @@ use crate::{
     HL_NODE,
     listeners::{directory::DirectoryListener, order_book::state::OrderBookState},
     order_book::{
-        Coin, Snapshot,
+        Coin, Px, Snapshot,
         multi_book::{Snapshots, load_snapshots_from_json},
     },
     prelude::*,
@@ -36,6 +36,9 @@ use utils::{BatchQueue, EventBatch, process_rmp_file, validate_snapshot_consiste
 
 mod state;
 mod utils;
+
+/// Maximum number of price levels to include in L4Book updates.
+const L4_BOOK_MAX_LEVELS: usize = 10;
 
 // WARNING - this code assumes no other file system operations are occurring in the watched directories
 // if there are scripts running, this may not work as intended
@@ -348,9 +351,14 @@ impl OrderBookListener {
                     } else {
                         None
                     };
+                    let price_boundaries = self
+                        .order_book_state
+                        .as_ref()
+                        .map(|s| s.price_boundaries(L4_BOOK_MAX_LEVELS))
+                        .unwrap_or_default();
                     let updates = Arc::new(InternalMessage::L4BookUpdates {
                         diff_batch: order_diffs,
-                        status_batch: order_statuses,
+                        price_boundaries,
                     });
                     let _unused = tx.send(updates);
                     if let Some(oo_updates) = open_orders_update {
@@ -644,7 +652,7 @@ pub(crate) enum InternalMessage {
     },
     L4BookUpdates {
         diff_batch: Batch<NodeDataOrderDiff>,
-        status_batch: Batch<NodeDataOrderStatus>,
+        price_boundaries: HashMap<Coin, [Option<Px>; 2]>,
     },
     OpenOrdersUpdate {
         changed_users: HashMap<Address, Vec<L4Order>>,

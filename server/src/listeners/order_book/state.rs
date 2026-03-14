@@ -1,7 +1,7 @@
 use crate::{
     listeners::order_book::{L2Snapshots, TimedSnapshots, utils::compute_l2_snapshots},
     order_book::{
-        Coin, InnerOrder, Oid,
+        Coin, InnerOrder, Oid, Px,
         multi_book::{OrderBooks, Snapshots},
     },
     prelude::*,
@@ -51,6 +51,10 @@ impl OrderBookState {
     // compute snapshot for specific coins only
     pub(super) fn compute_snapshot_for_coins(&self, coins: &[Coin]) -> TimedSnapshots {
         TimedSnapshots { time: self.time, height: self.height, snapshot: self.order_book.to_snapshots_for_coins(coins) }
+    }
+
+    pub(super) fn price_boundaries(&self, n_levels: usize) -> HashMap<Coin, [Option<Px>; 2]> {
+        self.order_book.price_boundaries(n_levels)
     }
 
     // (time, snapshot)

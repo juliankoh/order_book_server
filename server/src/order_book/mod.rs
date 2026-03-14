@@ -111,6 +111,13 @@ impl<O: InnerOrder> OrderBook<O> {
         false
     }
 
+    /// Returns [Nth best bid price, Nth best ask price] as boundaries for top-of-book filtering.
+    pub(crate) fn price_boundaries(&self, n_levels: usize) -> [Option<Px>; 2] {
+        let bid = self.bids.iter().rev().nth(n_levels.saturating_sub(1)).map(|(px, _)| *px);
+        let ask = self.asks.iter().nth(n_levels.saturating_sub(1)).map(|(px, _)| *px);
+        [bid, ask]
+    }
+
     // we go by the convention that prioritized orders go first in the vector; this makes aggregation step later easier.
     pub(crate) fn to_snapshot(&self) -> Snapshot<O> {
         let bids = self.bids.iter().rev().flat_map(|(_, l)| l.to_vec().into_iter().cloned()).collect_vec();

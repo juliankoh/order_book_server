@@ -37,6 +37,10 @@ impl NodeDataOrderDiff {
     pub(crate) const fn raw_oid(&self) -> u64 {
         self.oid
     }
+
+    pub(crate) fn px(&self) -> &str {
+        &self.px
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
