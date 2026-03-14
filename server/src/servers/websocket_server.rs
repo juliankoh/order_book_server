@@ -371,7 +371,7 @@ async fn send_socket_message(socket: &mut WebSocket, msg: ServerResponse) -> boo
     match msg {
         Ok(msg) => {
             let size = msg.len();
-            if size > 10_000 {
+            if size > 500_000 {
                 info!("Sending large message: channel={channel} size={size} bytes");
             }
             if let Err(err) = socket.send(FrameView::text(msg)).await {
