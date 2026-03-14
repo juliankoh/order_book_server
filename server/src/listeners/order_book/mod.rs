@@ -405,9 +405,9 @@ impl OrderBookListener {
         }
     }
 
-    // forcibly grab current snapshot
-    pub(crate) fn compute_snapshot(&mut self) -> Option<TimedSnapshots> {
-        self.order_book_state.as_mut().map(|o| o.compute_snapshot())
+    // compute snapshot for specific coins only
+    pub(crate) fn compute_snapshot_for_coins(&self, coins: &[Coin]) -> Option<TimedSnapshots> {
+        self.order_book_state.as_ref().map(|o| o.compute_snapshot_for_coins(coins))
     }
 
     // prevent snapshotting mutiple times at the same height

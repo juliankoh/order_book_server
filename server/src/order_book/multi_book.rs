@@ -67,6 +67,15 @@ impl<O: Send + Sync + InnerOrder> OrderBooks<O> {
         let snapshots = self.order_books.par_iter().map(|(c, book)| (c.clone(), book.to_snapshot())).collect();
         Snapshots(snapshots)
     }
+
+    #[must_use]
+    pub(crate) fn to_snapshots_for_coins(&self, coins: &[Coin]) -> Snapshots<O> {
+        let snapshots = coins
+            .iter()
+            .filter_map(|coin| self.order_books.get(coin).map(|book| (coin.clone(), book.to_snapshot())))
+            .collect();
+        Snapshots(snapshots)
+    }
 }
 
 pub(crate) fn load_snapshots_from_str<O, R>(str: &str) -> Result<(u64, Snapshots<O>)>

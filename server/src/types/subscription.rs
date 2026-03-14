@@ -119,20 +119,62 @@ impl ServerResponse {
 
 #[derive(Default)]
 pub(crate) struct SubscriptionManager {
-    subscriptions: HashSet<Subscription>,
+    all: HashSet<Subscription>,
+    trades: Vec<Subscription>,
+    l2_books: Vec<Subscription>,
+    l4_books: Vec<Subscription>,
+    l4_book_streams: Vec<Subscription>,
+    open_orders: Vec<Subscription>,
 }
 
 impl SubscriptionManager {
     pub(crate) fn subscribe(&mut self, sub: Subscription) -> bool {
-        self.subscriptions.insert(sub)
+        if !self.all.insert(sub.clone()) {
+            return false;
+        }
+        self.typed_vec_mut(&sub).push(sub);
+        true
     }
 
     pub(crate) fn unsubscribe(&mut self, sub: Subscription) -> bool {
-        self.subscriptions.remove(&sub)
+        if !self.all.remove(&sub) {
+            return false;
+        }
+        let vec = self.typed_vec_mut(&sub);
+        if let Some(pos) = vec.iter().position(|s| s == &sub) {
+            vec.swap_remove(pos);
+        }
+        true
     }
 
-    pub(crate) const fn subscriptions(&self) -> &HashSet<Subscription> {
-        &self.subscriptions
+    fn typed_vec_mut(&mut self, sub: &Subscription) -> &mut Vec<Subscription> {
+        match sub {
+            Subscription::Trades { .. } => &mut self.trades,
+            Subscription::L2Book { .. } => &mut self.l2_books,
+            Subscription::L4Book { .. } => &mut self.l4_books,
+            Subscription::L4BookStream { .. } => &mut self.l4_book_streams,
+            Subscription::OpenOrders { .. } => &mut self.open_orders,
+        }
+    }
+
+    pub(crate) fn trades(&self) -> &[Subscription] {
+        &self.trades
+    }
+
+    pub(crate) fn l2_books(&self) -> &[Subscription] {
+        &self.l2_books
+    }
+
+    pub(crate) fn l4_books(&self) -> &[Subscription] {
+        &self.l4_books
+    }
+
+    pub(crate) fn l4_book_streams(&self) -> &[Subscription] {
+        &self.l4_book_streams
+    }
+
+    pub(crate) fn open_orders(&self) -> &[Subscription] {
+        &self.open_orders
     }
 }
 

@@ -1,15 +1,11 @@
 use crate::{
     listeners::order_book::{L2SnapshotParams, L2Snapshots},
     order_book::{
-        Snapshot,
         multi_book::{OrderBooks, Snapshots},
         types::InnerOrder,
     },
     prelude::*,
-    types::{
-        inner::InnerLevel,
-        node_data::{Batch, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
-    },
+    types::node_data::{Batch, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
 };
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use reqwest::Client;
@@ -89,30 +85,10 @@ pub(super) fn compute_l2_snapshots<O: InnerOrder + Send + Sync>(order_books: &Or
             .as_ref()
             .par_iter()
             .map(|(coin, order_book)| {
-                let mut entries = Vec::new();
                 let snapshot = order_book.to_l2_snapshot(None, None, None);
-                entries.push((L2SnapshotParams { n_sig_figs: None, mantissa: None }, snapshot));
-                let mut add_new_snapshot = |n_sig_figs: Option<u32>, mantissa: Option<u64>, idx: usize| {
-                    if let Some((_, last_snapshot)) = &entries.get(entries.len() - idx) {
-                        let snapshot = last_snapshot.to_l2_snapshot(None, n_sig_figs, mantissa);
-                        entries.push((L2SnapshotParams { n_sig_figs, mantissa }, snapshot));
-                    }
-                };
-                for n_sig_figs in (2..=5).rev() {
-                    if n_sig_figs == 5 {
-                        for mantissa in [None, Some(2), Some(5)] {
-                            if mantissa == Some(5) {
-                                // Some(2) is NOT a superset of this info!
-                                add_new_snapshot(Some(n_sig_figs), mantissa, 2);
-                            } else {
-                                add_new_snapshot(Some(n_sig_figs), mantissa, 1);
-                            }
-                        }
-                    } else {
-                        add_new_snapshot(Some(n_sig_figs), None, 1);
-                    }
-                }
-                (coin.clone(), entries.into_iter().collect::<HashMap<L2SnapshotParams, Snapshot<InnerLevel>>>())
+                let mut entries = HashMap::new();
+                entries.insert(L2SnapshotParams { n_sig_figs: None, mantissa: None }, snapshot);
+                (coin.clone(), entries)
             })
             .collect(),
     )

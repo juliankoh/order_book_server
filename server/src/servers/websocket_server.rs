@@ -185,9 +185,16 @@ async fn handle_socket(
                 }
 
                 // Pre-compute snapshot data with a single lock acquisition
-                let needs_l4_snapshot = client_messages.iter().any(|msg| {
-                    matches!(msg, ClientMessage::Subscribe { subscription: Subscription::L4Book { .. } })
-                });
+                let l4_coins: Vec<Coin> = client_messages
+                    .iter()
+                    .filter_map(|msg| {
+                        if let ClientMessage::Subscribe { subscription: Subscription::L4Book { coin } } = msg {
+                            Some(Coin::new(coin))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
                 let open_order_addrs: Vec<Address> = client_messages
                     .iter()
                     .filter_map(|msg| {
@@ -200,9 +207,9 @@ async fn handle_socket(
                     .collect();
 
                 let (precomputed_snapshot, precomputed_open_orders) =
-                    if needs_l4_snapshot || !open_order_addrs.is_empty() {
-                        let mut guard = listener.lock().await;
-                        let snapshot = if needs_l4_snapshot { guard.compute_snapshot() } else { None };
+                    if !l4_coins.is_empty() || !open_order_addrs.is_empty() {
+                        let guard = listener.lock().await;
+                        let snapshot = if !l4_coins.is_empty() { guard.compute_snapshot_for_coins(&l4_coins) } else { None };
                         let open_orders: HashMap<Address, Vec<L4Order>> = open_order_addrs
                             .iter()
                             .map(|addr| (*addr, guard.get_open_orders(addr)))
@@ -238,7 +245,7 @@ async fn handle_socket(
                             InternalMessage::Snapshot{ l2_snapshots, time } => {
                                 universe = new_universe(l2_snapshots, ignore_spot);
                                 let mut ok = true;
-                                for sub in manager.subscriptions() {
+                                for sub in manager.l2_books() {
                                     if !send_ws_data_from_snapshot(&mut socket, sub, l2_snapshots.as_ref(), *time).await {
                                         ok = false;
                                         break;
@@ -249,7 +256,7 @@ async fn handle_socket(
                             InternalMessage::Fills{ batch } => {
                                 let mut trades = coin_to_trades(batch);
                                 let mut ok = true;
-                                for sub in manager.subscriptions() {
+                                for sub in manager.trades() {
                                     if !send_ws_data_from_trades(&mut socket, sub, &mut trades).await {
                                         ok = false;
                                         break;
@@ -260,7 +267,7 @@ async fn handle_socket(
                             InternalMessage::L4BookUpdates{ diff_batch, status_batch } => {
                                 let mut book_updates = coin_to_book_updates(diff_batch, status_batch);
                                 let mut ok = true;
-                                for sub in manager.subscriptions() {
+                                for sub in manager.l4_books() {
                                     if !send_ws_data_from_book_updates(&mut socket, sub, &mut book_updates).await {
                                         ok = false;
                                         break;
@@ -270,7 +277,7 @@ async fn handle_socket(
                             },
                             InternalMessage::OpenOrdersUpdate { changed_users } => {
                                 let mut ok = true;
-                                for sub in manager.subscriptions() {
+                                for sub in manager.open_orders() {
                                     if !send_ws_data_from_open_orders(&mut socket, sub, changed_users).await {
                                         ok = false;
                                         break;
@@ -281,7 +288,7 @@ async fn handle_socket(
                             InternalMessage::StreamingBookDiffs { diffs, time, height } => {
                                 let mut updates = coin_to_streaming_book_updates(diffs, *time, *height);
                                 let mut ok = true;
-                                for sub in manager.subscriptions() {
+                                for sub in manager.l4_book_streams() {
                                     if !send_ws_data_from_streaming_book_updates(&mut socket, sub, &mut updates).await {
                                         ok = false;
                                         break;
@@ -421,24 +428,15 @@ async fn send_ws_data_from_snapshot(
 }
 
 fn coin_to_trades(batch: &Batch<NodeDataFill>) -> HashMap<String, Vec<Trade>> {
-    let mut fills = batch.clone().events();
+    let fills = batch.events_ref();
     let mut trades = HashMap::new();
-    while fills.len() >= 2 {
-        let f2 = fills.pop();
-        let f1 = fills.pop();
-        if let Some(f1) = f1 {
-            if let Some(f2) = f2 {
-                let mut fills = HashMap::new();
-                fills.insert(f1.1.side, f1);
-                fills.insert(f2.1.side, f2);
-                let trade = Trade::from_fills(fills);
-                let coin = trade.coin.clone();
-                trades.entry(coin).or_insert_with(Vec::new).push(trade);
-            }
-        }
-    }
-    for list in trades.values_mut() {
-        list.reverse();
+    for pair in fills.chunks_exact(2) {
+        let mut fill_map = HashMap::new();
+        fill_map.insert(pair[0].1.side, pair[0].clone());
+        fill_map.insert(pair[1].1.side, pair[1].clone());
+        let trade = Trade::from_fills(fill_map);
+        let coin = trade.coin.clone();
+        trades.entry(coin).or_insert_with(Vec::new).push(trade);
     }
     trades
 }
@@ -447,18 +445,16 @@ fn coin_to_book_updates(
     diff_batch: &Batch<NodeDataOrderDiff>,
     status_batch: &Batch<NodeDataOrderStatus>,
 ) -> HashMap<String, L4BookUpdates> {
-    let diffs = diff_batch.clone().events();
-    let statuses = status_batch.clone().events();
     let time = diff_batch.block_time();
     let height = diff_batch.block_number();
     let mut updates = HashMap::new();
-    for diff in diffs {
+    for diff in diff_batch.events_ref() {
         let coin = diff.coin().value();
-        updates.entry(coin).or_insert_with(|| L4BookUpdates::new(time, height)).book_diffs.push(diff);
+        updates.entry(coin).or_insert_with(|| L4BookUpdates::new(time, height)).book_diffs.push(diff.clone());
     }
-    for status in statuses {
+    for status in status_batch.events_ref() {
         let coin = status.order.coin.clone();
-        updates.entry(coin).or_insert_with(|| L4BookUpdates::new(time, height)).order_statuses.push(status);
+        updates.entry(coin).or_insert_with(|| L4BookUpdates::new(time, height)).order_statuses.push(status.clone());
     }
     updates
 }

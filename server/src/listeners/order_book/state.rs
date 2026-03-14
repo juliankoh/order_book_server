@@ -48,6 +48,11 @@ impl OrderBookState {
         TimedSnapshots { time: self.time, height: self.height, snapshot: self.order_book.to_snapshots_par() }
     }
 
+    // compute snapshot for specific coins only
+    pub(super) fn compute_snapshot_for_coins(&self, coins: &[Coin]) -> TimedSnapshots {
+        TimedSnapshots { time: self.time, height: self.height, snapshot: self.order_book.to_snapshots_for_coins(coins) }
+    }
+
     // (time, snapshot)
     pub(super) fn l2_snapshots(&mut self, prevent_future_snaps: bool) -> Option<(u64, L2Snapshots)> {
         if self.snapped {

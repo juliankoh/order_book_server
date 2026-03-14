@@ -34,6 +34,7 @@ impl<O: InnerOrder> OrderBook<O> {
 }
 
 impl Snapshot<InnerLevel> {
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn to_l2_snapshot(
         &self,
@@ -52,6 +53,7 @@ impl Snapshot<InnerLevel> {
     }
 }
 
+#[cfg(test)]
 #[must_use]
 fn l2_levels_to_l2_levels(
     levels: &[InnerLevel],
