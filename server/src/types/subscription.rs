@@ -13,6 +13,7 @@ pub(crate) const DEFAULT_LEVELS: usize = 20;
 pub(crate) enum ClientMessage {
     Subscribe { subscription: Subscription },
     Unsubscribe { subscription: Subscription },
+    Ping,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -97,6 +98,7 @@ pub(crate) enum ServerResponse {
     L4BookStream(L4BookStream),
     Trades(Vec<Trade>),
     OpenOrders(OpenOrdersData),
+    Pong,
     Error(String),
 }
 

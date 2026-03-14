@@ -241,8 +241,13 @@ async fn receive_client_message(
     universe: &HashSet<String>,
     listener: Arc<Mutex<OrderBookListener>>,
 ) -> bool {
+    if matches!(client_message, ClientMessage::Ping) {
+        let msg = ServerResponse::Pong;
+        return send_socket_message(socket, msg).await;
+    }
     let subscription = match &client_message {
         ClientMessage::Unsubscribe { subscription } | ClientMessage::Subscribe { subscription } => subscription.clone(),
+        ClientMessage::Ping => unreachable!(),
     };
     // this is used for display purposes only, hence unwrap_or_default. It also shouldn't fail
     let sub = serde_json::to_string(&subscription).unwrap_or_default();
@@ -253,6 +258,7 @@ async fn receive_client_message(
     let (word, success) = match &client_message {
         ClientMessage::Subscribe { .. } => ("", manager.subscribe(subscription)),
         ClientMessage::Unsubscribe { .. } => ("un", manager.unsubscribe(subscription)),
+        ClientMessage::Ping => unreachable!(),
     };
     if success {
         let snapshot_msg = if let ClientMessage::Subscribe { subscription } = &client_message {
