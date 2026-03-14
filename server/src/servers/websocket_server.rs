@@ -6,7 +6,7 @@ use crate::{
     prelude::*,
     types::{
         L2Book, L4Book, L4BookStream, L4BookUpdates, L4Order, OpenOrdersData, Trade,
-        inner::InnerLevel,
+        inner::{InnerL4Order, InnerLevel},
         node_data::{Batch, NodeDataFill, NodeDataOrderDiff, NodeDataOrderStatus},
         subscription::{ClientMessage, DEFAULT_LEVELS, ServerResponse, Subscription, SubscriptionManager},
     },
@@ -538,8 +538,31 @@ async fn send_ws_data_from_trades(
     true
 }
 
+/// Maximum number of price levels to include in an L4Book initial snapshot.
+const L4_SNAPSHOT_MAX_LEVELS: usize = 20;
+
+/// Truncate a list of orders (sorted by price priority) to the top N distinct price levels.
+fn truncate_to_n_levels(orders: Vec<InnerL4Order>, n_levels: usize) -> Vec<InnerL4Order> {
+    let mut result = Vec::new();
+    let mut seen_levels = 0usize;
+    let mut last_px = None;
+    for order in orders {
+        let px = order.limit_px;
+        if last_px != Some(px) {
+            seen_levels += 1;
+            if seen_levels > n_levels {
+                break;
+            }
+            last_px = Some(px);
+        }
+        result.push(order);
+    }
+    result
+}
+
 impl Subscription {
     /// Build snapshot response from precomputed data (no listener lock needed).
+    /// L4Book snapshots are truncated to the top N price levels per side.
     fn build_snapshot_response(
         &self,
         precomputed_snapshot: &Option<TimedSnapshots>,
@@ -549,8 +572,20 @@ impl Subscription {
             if let Some(TimedSnapshots { time, height, snapshot }) = precomputed_snapshot {
                 let snap = snapshot.as_ref().get(&Coin::new(coin));
                 if let Some(snap) = snap {
-                    let levels =
-                        snap.as_ref().clone().map(|orders| orders.into_iter().map(L4Order::from).collect());
+                    let [full_bids, full_asks] = snap.as_ref();
+                    let total_orders = full_bids.len() + full_asks.len();
+                    let levels: [Vec<L4Order>; 2] = snap.as_ref().clone().map(|orders| {
+                        truncate_to_n_levels(orders, L4_SNAPSHOT_MAX_LEVELS)
+                            .into_iter()
+                            .map(L4Order::from)
+                            .collect()
+                    });
+                    let truncated_orders = levels[0].len() + levels[1].len();
+                    if truncated_orders < total_orders {
+                        info!(
+                            "L4Book snapshot truncated for {coin}: {total_orders} -> {truncated_orders} orders (top {L4_SNAPSHOT_MAX_LEVELS} levels)"
+                        );
+                    }
                     return Ok(Some(ServerResponse::L4Book(L4Book::Snapshot {
                         coin: coin.clone(),
                         time: *time,
