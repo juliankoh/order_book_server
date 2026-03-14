@@ -13,7 +13,7 @@ use crate::{
 };
 use alloy::primitives::Address;
 use axum::{Router, response::IntoResponse, routing::get};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{FutureExt, SinkExt, StreamExt};
 use log::{error, info};
 use std::{
     collections::{HashMap, HashSet},
@@ -117,7 +117,120 @@ async fn handle_socket(
         return;
     }
     loop {
+        // biased: prefer draining client messages before processing internal broadcasts,
+        // so a burst of subscribes isn't interleaved with update messages.
         select! {
+            biased;
+
+            msg = socket.next() => {
+                // Collect the first frame
+                let first_frame = match msg {
+                    Some(frame) => frame,
+                    None => {
+                        info!("Client connection closed");
+                        return;
+                    }
+                };
+
+                // Drain any additional pending client frames to process as a batch
+                let mut frames = vec![first_frame];
+                while let Some(maybe_frame) = socket.next().now_or_never() {
+                    match maybe_frame {
+                        Some(frame) => frames.push(frame),
+                        None => {
+                            info!("Client connection closed during drain");
+                            return;
+                        }
+                    }
+                }
+
+                if frames.len() > 1 {
+                    info!("Processing batch of {} client messages", frames.len());
+                }
+
+                // Parse all frames into client messages
+                let mut client_messages = Vec::new();
+                for frame in frames {
+                    match frame.opcode {
+                        OpCode::Text => {
+                            let text = match std::str::from_utf8(&frame.payload) {
+                                Ok(text) => text,
+                                Err(err) => {
+                                    log::warn!("unable to parse websocket content: {err}: {:?}", frame.payload.as_ref());
+                                    return;
+                                }
+                            };
+                            info!("Client message: {text}");
+                            match serde_json::from_str::<ClientMessage>(text) {
+                                Ok(value) => client_messages.push(value),
+                                Err(_) => {
+                                    let msg = ServerResponse::Error(format!("Error parsing JSON into valid websocket request: {text}"));
+                                    if !send_socket_message(&mut socket, msg).await {
+                                        info!("Client connection lost, cleaning up");
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        OpCode::Close => {
+                            info!("Client disconnected");
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+
+                if client_messages.is_empty() {
+                    continue;
+                }
+
+                // Pre-compute snapshot data with a single lock acquisition
+                let needs_l4_snapshot = client_messages.iter().any(|msg| {
+                    matches!(msg, ClientMessage::Subscribe { subscription: Subscription::L4Book { .. } })
+                });
+                let open_order_addrs: Vec<Address> = client_messages
+                    .iter()
+                    .filter_map(|msg| {
+                        if let ClientMessage::Subscribe { subscription: Subscription::OpenOrders { user } } = msg {
+                            user.parse::<Address>().ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                let (precomputed_snapshot, precomputed_open_orders) =
+                    if needs_l4_snapshot || !open_order_addrs.is_empty() {
+                        let mut guard = listener.lock().await;
+                        let snapshot = if needs_l4_snapshot { guard.compute_snapshot() } else { None };
+                        let open_orders: HashMap<Address, Vec<L4Order>> = open_order_addrs
+                            .iter()
+                            .map(|addr| (*addr, guard.get_open_orders(addr)))
+                            .collect();
+                        drop(guard);
+                        (snapshot, open_orders)
+                    } else {
+                        (None, HashMap::new())
+                    };
+
+                // Process all messages using precomputed data (no further listener locks needed)
+                for msg in client_messages {
+                    if !receive_client_message(
+                        &mut socket,
+                        &mut manager,
+                        msg,
+                        &universe,
+                        &precomputed_snapshot,
+                        &precomputed_open_orders,
+                    )
+                    .await
+                    {
+                        info!("Client connection lost, cleaning up");
+                        return;
+                    }
+                }
+            }
+
             recv_result = internal_message_rx.recv() => {
                 match recv_result {
                     Ok(msg) => {
@@ -188,58 +301,19 @@ async fn handle_socket(
                     }
                 }
             }
-
-            msg = socket.next() => {
-                if let Some(frame) = msg {
-                    match frame.opcode {
-                        OpCode::Text => {
-                            let text = match std::str::from_utf8(&frame.payload) {
-                                Ok(text) => text,
-                                Err(err) => {
-                                    log::warn!("unable to parse websocket content: {err}: {:?}", frame.payload.as_ref());
-                                    // deserves to close the connection because the payload is not a valid utf8 string.
-                                    return;
-                                }
-                            };
-
-                            info!("Client message: {text}");
-
-                            if let Ok(value) = serde_json::from_str::<ClientMessage>(text) {
-                                if !receive_client_message(&mut socket, &mut manager, value, &universe, listener.clone()).await {
-                                    info!("Client connection lost, cleaning up");
-                                    return;
-                                }
-                            }
-                            else {
-                                let msg = ServerResponse::Error(format!("Error parsing JSON into valid websocket request: {text}"));
-                                if !send_socket_message(&mut socket, msg).await {
-                                    info!("Client connection lost, cleaning up");
-                                    return;
-                                }
-                            }
-                        }
-                        OpCode::Close => {
-                            info!("Client disconnected");
-                            return;
-                        }
-                        _ => {}
-                    }
-                } else {
-                    info!("Client connection closed");
-                    return;
-                }
-            }
         }
     }
 }
 
 /// Returns `true` if the connection is still alive.
+/// Uses precomputed snapshot/open_orders data so no listener lock is needed.
 async fn receive_client_message(
     socket: &mut WebSocket,
     manager: &mut SubscriptionManager,
     client_message: ClientMessage,
     universe: &HashSet<String>,
-    listener: Arc<Mutex<OrderBookListener>>,
+    precomputed_snapshot: &Option<TimedSnapshots>,
+    precomputed_open_orders: &HashMap<Address, Vec<L4Order>>,
 ) -> bool {
     if matches!(client_message, ClientMessage::Ping) {
         let msg = ServerResponse::Pong;
@@ -262,7 +336,7 @@ async fn receive_client_message(
     };
     if success {
         let snapshot_msg = if let ClientMessage::Subscribe { subscription } = &client_message {
-            let msg = subscription.handle_immediate_snapshot(listener).await;
+            let msg = subscription.build_snapshot_response(precomputed_snapshot, precomputed_open_orders);
             match msg {
                 Ok(msg) => msg,
                 Err(err) => {
@@ -292,11 +366,16 @@ async fn receive_client_message(
 
 /// Returns `true` if the message was sent successfully, `false` if the connection is dead.
 async fn send_socket_message(socket: &mut WebSocket, msg: ServerResponse) -> bool {
+    let channel = msg.channel_name();
     let msg = serde_json::to_string(&msg);
     match msg {
         Ok(msg) => {
+            let size = msg.len();
+            if size > 10_000 {
+                info!("Sending large message: channel={channel} size={size} bytes");
+            }
             if let Err(err) = socket.send(FrameView::text(msg)).await {
-                error!("Failed to send: {err}");
+                error!("Failed to send: channel={channel} size={size} err={err}");
                 return false;
             }
         }
@@ -460,24 +539,23 @@ async fn send_ws_data_from_trades(
 }
 
 impl Subscription {
-    // snapshots that begin a stream
-    async fn handle_immediate_snapshot(
+    /// Build snapshot response from precomputed data (no listener lock needed).
+    fn build_snapshot_response(
         &self,
-        listener: Arc<Mutex<OrderBookListener>>,
+        precomputed_snapshot: &Option<TimedSnapshots>,
+        precomputed_open_orders: &HashMap<Address, Vec<L4Order>>,
     ) -> Result<Option<ServerResponse>> {
         if let Self::L4Book { coin } = self {
-            let snapshot = listener.lock().await.compute_snapshot();
-            if let Some(TimedSnapshots { time, height, snapshot }) = snapshot {
-                let snapshot =
-                    snapshot.value().into_iter().filter(|(c, _)| *c == Coin::new(coin)).collect::<Vec<_>>().pop();
-                if let Some((coin, snapshot)) = snapshot {
-                    let snapshot =
-                        snapshot.as_ref().clone().map(|orders| orders.into_iter().map(L4Order::from).collect());
+            if let Some(TimedSnapshots { time, height, snapshot }) = precomputed_snapshot {
+                let snap = snapshot.as_ref().get(&Coin::new(coin));
+                if let Some(snap) = snap {
+                    let levels =
+                        snap.as_ref().clone().map(|orders| orders.into_iter().map(L4Order::from).collect());
                     return Ok(Some(ServerResponse::L4Book(L4Book::Snapshot {
-                        coin: coin.value(),
-                        time,
-                        height,
-                        levels: snapshot,
+                        coin: coin.clone(),
+                        time: *time,
+                        height: *height,
+                        levels,
                     })));
                 }
             }
@@ -485,8 +563,13 @@ impl Subscription {
         }
         if let Self::OpenOrders { user } = self {
             let addr = user.parse::<Address>().map_err(|e| format!("Invalid address: {e}"))?;
-            let orders = listener.lock().await.get_open_orders(&addr);
-            return Ok(Some(ServerResponse::OpenOrders(OpenOrdersData { user: addr, open_orders: orders })));
+            if let Some(orders) = precomputed_open_orders.get(&addr) {
+                return Ok(Some(ServerResponse::OpenOrders(OpenOrdersData {
+                    user: addr,
+                    open_orders: orders.clone(),
+                })));
+            }
+            return Err("Open orders not available".into());
         }
         Ok(None)
     }

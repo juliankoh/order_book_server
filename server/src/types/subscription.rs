@@ -102,6 +102,21 @@ pub(crate) enum ServerResponse {
     Error(String),
 }
 
+impl ServerResponse {
+    pub(crate) const fn channel_name(&self) -> &'static str {
+        match self {
+            Self::SubscriptionResponse(_) => "subscriptionResponse",
+            Self::L2Book(_) => "l2Book",
+            Self::L4Book(_) => "l4Book",
+            Self::L4BookStream(_) => "l4BookStream",
+            Self::Trades(_) => "trades",
+            Self::OpenOrders(_) => "openOrders",
+            Self::Pong => "pong",
+            Self::Error(_) => "error",
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct SubscriptionManager {
     subscriptions: HashSet<Subscription>,
