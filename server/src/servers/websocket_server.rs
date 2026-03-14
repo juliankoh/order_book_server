@@ -121,38 +121,66 @@ async fn handle_socket(
             recv_result = internal_message_rx.recv() => {
                 match recv_result {
                     Ok(msg) => {
-                        match msg.as_ref() {
+                        let ok = match msg.as_ref() {
                             InternalMessage::Snapshot{ l2_snapshots, time } => {
                                 universe = new_universe(l2_snapshots, ignore_spot);
+                                let mut ok = true;
                                 for sub in manager.subscriptions() {
-                                    send_ws_data_from_snapshot(&mut socket, sub, l2_snapshots.as_ref(), *time).await;
+                                    if !send_ws_data_from_snapshot(&mut socket, sub, l2_snapshots.as_ref(), *time).await {
+                                        ok = false;
+                                        break;
+                                    }
                                 }
+                                ok
                             },
                             InternalMessage::Fills{ batch } => {
                                 let mut trades = coin_to_trades(batch);
+                                let mut ok = true;
                                 for sub in manager.subscriptions() {
-                                    send_ws_data_from_trades(&mut socket, sub, &mut trades).await;
+                                    if !send_ws_data_from_trades(&mut socket, sub, &mut trades).await {
+                                        ok = false;
+                                        break;
+                                    }
                                 }
+                                ok
                             },
                             InternalMessage::L4BookUpdates{ diff_batch, status_batch } => {
                                 let mut book_updates = coin_to_book_updates(diff_batch, status_batch);
+                                let mut ok = true;
                                 for sub in manager.subscriptions() {
-                                    send_ws_data_from_book_updates(&mut socket, sub, &mut book_updates).await;
+                                    if !send_ws_data_from_book_updates(&mut socket, sub, &mut book_updates).await {
+                                        ok = false;
+                                        break;
+                                    }
                                 }
+                                ok
                             },
                             InternalMessage::OpenOrdersUpdate { changed_users } => {
+                                let mut ok = true;
                                 for sub in manager.subscriptions() {
-                                    send_ws_data_from_open_orders(&mut socket, sub, changed_users).await;
+                                    if !send_ws_data_from_open_orders(&mut socket, sub, changed_users).await {
+                                        ok = false;
+                                        break;
+                                    }
                                 }
+                                ok
                             },
                             InternalMessage::StreamingBookDiffs { diffs, time, height } => {
                                 let mut updates = coin_to_streaming_book_updates(diffs, *time, *height);
+                                let mut ok = true;
                                 for sub in manager.subscriptions() {
-                                    send_ws_data_from_streaming_book_updates(&mut socket, sub, &mut updates).await;
+                                    if !send_ws_data_from_streaming_book_updates(&mut socket, sub, &mut updates).await {
+                                        ok = false;
+                                        break;
+                                    }
                                 }
+                                ok
                             },
+                        };
+                        if !ok {
+                            info!("Client connection lost, cleaning up");
+                            return;
                         }
-
                     }
                     Err(err) => {
                         error!("Receiver error: {err}");
@@ -177,11 +205,17 @@ async fn handle_socket(
                             info!("Client message: {text}");
 
                             if let Ok(value) = serde_json::from_str::<ClientMessage>(text) {
-                                receive_client_message(&mut socket, &mut manager, value, &universe, listener.clone()).await;
+                                if !receive_client_message(&mut socket, &mut manager, value, &universe, listener.clone()).await {
+                                    info!("Client connection lost, cleaning up");
+                                    return;
+                                }
                             }
                             else {
                                 let msg = ServerResponse::Error(format!("Error parsing JSON into valid websocket request: {text}"));
-                                send_socket_message(&mut socket, msg).await;
+                                if !send_socket_message(&mut socket, msg).await {
+                                    info!("Client connection lost, cleaning up");
+                                    return;
+                                }
                             }
                         }
                         OpCode::Close => {
@@ -199,13 +233,14 @@ async fn handle_socket(
     }
 }
 
+/// Returns `true` if the connection is still alive.
 async fn receive_client_message(
     socket: &mut WebSocket,
     manager: &mut SubscriptionManager,
     client_message: ClientMessage,
     universe: &HashSet<String>,
     listener: Arc<Mutex<OrderBookListener>>,
-) {
+) -> bool {
     let subscription = match &client_message {
         ClientMessage::Unsubscribe { subscription } | ClientMessage::Subscribe { subscription } => subscription.clone(),
     };
@@ -213,8 +248,7 @@ async fn receive_client_message(
     let sub = serde_json::to_string(&subscription).unwrap_or_default();
     if !subscription.validate(universe) {
         let msg = ServerResponse::Error(format!("Invalid subscription: {sub}"));
-        send_socket_message(socket, msg).await;
-        return;
+        return send_socket_message(socket, msg).await;
     }
     let (word, success) = match &client_message {
         ClientMessage::Subscribe { .. } => ("", manager.subscribe(subscription)),
@@ -228,36 +262,44 @@ async fn receive_client_message(
                 Err(err) => {
                     manager.unsubscribe(subscription.clone());
                     let msg = ServerResponse::Error(format!("Unable to grab order book snapshot: {err}"));
-                    send_socket_message(socket, msg).await;
-                    return;
+                    return send_socket_message(socket, msg).await;
                 }
             }
         } else {
             None
         };
         let msg = ServerResponse::SubscriptionResponse(client_message);
-        send_socket_message(socket, msg).await;
+        if !send_socket_message(socket, msg).await {
+            return false;
+        }
         if let Some(snapshot_msg) = snapshot_msg {
-            send_socket_message(socket, snapshot_msg).await;
+            if !send_socket_message(socket, snapshot_msg).await {
+                return false;
+            }
         }
     } else {
         let msg = ServerResponse::Error(format!("Already {word}subscribed: {sub}"));
-        send_socket_message(socket, msg).await;
+        return send_socket_message(socket, msg).await;
     }
+    true
 }
 
-async fn send_socket_message(socket: &mut WebSocket, msg: ServerResponse) {
+/// Returns `true` if the message was sent successfully, `false` if the connection is dead.
+async fn send_socket_message(socket: &mut WebSocket, msg: ServerResponse) -> bool {
     let msg = serde_json::to_string(&msg);
     match msg {
         Ok(msg) => {
             if let Err(err) = socket.send(FrameView::text(msg)).await {
                 error!("Failed to send: {err}");
+                return false;
             }
         }
         Err(err) => {
             error!("Server response serialization error: {err}");
+            return false;
         }
     }
+    true
 }
 
 // derive it from l2_snapshots because thats convenient
@@ -274,7 +316,7 @@ async fn send_ws_data_from_snapshot(
     subscription: &Subscription,
     snapshot: &HashMap<Coin, HashMap<L2SnapshotParams, Snapshot<InnerLevel>>>,
     time: u64,
-) {
+) -> bool {
     if let Subscription::L2Book { coin, n_sig_figs, n_levels, mantissa } = subscription {
         let snapshot = snapshot.get(&Coin::new(coin));
         if let Some(snapshot) =
@@ -285,11 +327,12 @@ async fn send_ws_data_from_snapshot(
             let snapshot = snapshot.export_inner_snapshot();
             let l2_book = L2Book::from_l2_snapshot(coin.clone(), snapshot, time);
             let msg = ServerResponse::L2Book(l2_book);
-            send_socket_message(socket, msg).await;
+            return send_socket_message(socket, msg).await;
         } else {
             error!("Coin {coin} not found");
         }
     }
+    true
 }
 
 fn coin_to_trades(batch: &Batch<NodeDataFill>) -> HashMap<String, Vec<Trade>> {
@@ -356,54 +399,58 @@ async fn send_ws_data_from_book_updates(
     socket: &mut WebSocket,
     subscription: &Subscription,
     book_updates: &mut HashMap<String, L4BookUpdates>,
-) {
+) -> bool {
     if let Subscription::L4Book { coin } = subscription {
         if let Some(updates) = book_updates.remove(coin) {
             let msg = ServerResponse::L4Book(L4Book::Updates(updates));
-            send_socket_message(socket, msg).await;
+            return send_socket_message(socket, msg).await;
         }
     }
+    true
 }
 
 async fn send_ws_data_from_streaming_book_updates(
     socket: &mut WebSocket,
     subscription: &Subscription,
     book_updates: &mut HashMap<String, L4BookStream>,
-) {
+) -> bool {
     if let Subscription::L4BookStream { coin } = subscription {
         if let Some(updates) = book_updates.remove(coin) {
             let msg = ServerResponse::L4BookStream(updates);
-            send_socket_message(socket, msg).await;
+            return send_socket_message(socket, msg).await;
         }
     }
+    true
 }
 
 async fn send_ws_data_from_open_orders(
     socket: &mut WebSocket,
     subscription: &Subscription,
     changed_users: &HashMap<Address, Vec<L4Order>>,
-) {
+) -> bool {
     if let Subscription::OpenOrders { user } = subscription {
         if let Ok(addr) = user.parse::<Address>() {
             if let Some(orders) = changed_users.get(&addr) {
                 let msg = ServerResponse::OpenOrders(OpenOrdersData { user: addr, open_orders: orders.clone() });
-                send_socket_message(socket, msg).await;
+                return send_socket_message(socket, msg).await;
             }
         }
     }
+    true
 }
 
 async fn send_ws_data_from_trades(
     socket: &mut WebSocket,
     subscription: &Subscription,
     trades: &mut HashMap<String, Vec<Trade>>,
-) {
+) -> bool {
     if let Subscription::Trades { coin } = subscription {
         if let Some(trades) = trades.remove(coin) {
             let msg = ServerResponse::Trades(trades);
-            send_socket_message(socket, msg).await;
+            return send_socket_message(socket, msg).await;
         }
     }
+    true
 }
 
 impl Subscription {
